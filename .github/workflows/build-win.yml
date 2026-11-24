@@ -7,6 +7,7 @@ on:
       - dev
     paths:
       - 'Telegram/SourceFiles/**'
+      - 'Telegram/build/prepare/**'
       - '.github/workflows/build-win.yml'
 
 permissions:
