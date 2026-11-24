@@ -236,7 +236,6 @@ void AddAction(
 		Documents &&documents,
 		Photos &&photos,
 		Fn<void()> callback) {
-	const auto totalCount = int(documents.size() + photos.size());
 	const auto icon = documents.empty()
 		? &st::menuIconSaveImage
 		: &st::menuIconDownload;
@@ -449,9 +448,15 @@ void AddAction(
 			});
 	};
 
-	const auto saveAsText = u"%1 (%2)"_q
-		.arg(tr::lng_context_save_file(tr::now))
-		.arg(totalCount);
+	auto saveAsText = tr::lng_context_save_file(tr::now).trimmed();
+	while (saveAsText.endsWith('.')
+		|| saveAsText.endsWith(QChar(0x2026))
+		|| saveAsText.endsWith(' ')) {
+		saveAsText.chop(1);
+	}
+	if (saveAsText.isEmpty()) {
+		saveAsText = tr::lng_context_save_file(tr::now);
+	}
 
 	if (Core::App().settings().askDownloadPath()) {
 		menu->addAction(saveAsText, chooseFolderAndSave, icon);

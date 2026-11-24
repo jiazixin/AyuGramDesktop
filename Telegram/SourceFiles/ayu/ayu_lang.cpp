@@ -22,6 +22,7 @@ std::map<QString, QString> langMapping = {
 	{"zh-hant-beta", "zh-hant"},
 	{"zh-hans-raw", "zh-hans"},
 	{"zh-hant-raw", "zh-hant"},
+	{"classic-zh-cn", "zh-hans"},
 };
 
 constexpr auto postfixes = {

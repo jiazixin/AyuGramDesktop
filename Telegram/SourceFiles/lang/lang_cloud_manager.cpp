@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "lang/lang_cloud_manager.h"
 
+#include "ayu/ayu_lang.h"
 #include "lang/lang_instance.h"
 #include "lang/lang_file_parser.h"
 #include "lang/lang_text_entity.h"
@@ -26,6 +27,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 namespace Lang {
 namespace {
+
+[[nodiscard]] QString DefaultChineseCandidate(int index) {
+	switch (index) {
+	case 0: return u"zh-hans-beta"_q;
+	case 1: return u"zh-hans-raw"_q;
+	case 2: return u"classic-zh-cn"_q;
+	default: return QString();
+	}
+}
 
 class ConfirmSwitchBox : public Ui::BoxContent {
 public:
@@ -166,6 +176,12 @@ CloudManager::CloudManager(Instance &langpack)
 		*mtpLifetime = account->mtpMainSessionValue(
 		) | rpl::on_next([=](not_null<MTP::Instance*> instance) {
 			_api.emplace(instance);
+			if (_langpack.id().isEmpty()
+				&& _defaultChineseAttempt == 0
+				&& _switchingToLanguageId.isEmpty()) {
+				_defaultChineseAttempt = 1;
+				requestLanguageAndSwitch(DefaultChineseCandidate(0), false);
+			}
 			resendRequests();
 		});
 	}, [=] {
@@ -263,6 +279,7 @@ void CloudManager::setSuggestedLanguage(const QString &langCode) {
 
 		if (Core::App().offerLegacyLangPackSwitch()
 			&& _langpack.id().isEmpty()
+			&& _defaultChineseAttempt == 0
 			&& !_suggestedLanguage.isEmpty()) {
 			_offerSwitchToId = _suggestedLanguage;
 			offerSwitchLangPack();
@@ -464,6 +481,19 @@ void CloudManager::sendSwitchingToLanguageRequest() {
 		});
 	}).fail([=](const MTP::Error &error) {
 		_switchingToLanguageRequest = 0;
+		const auto isAutoChinese = (_defaultChineseAttempt > 0)
+			&& (_switchingToLanguageId
+				== DefaultChineseCandidate(_defaultChineseAttempt - 1));
+		if (isAutoChinese) {
+			const auto next = DefaultChineseCandidate(_defaultChineseAttempt);
+			if (!next.isEmpty()) {
+				++_defaultChineseAttempt;
+				requestLanguageAndSwitch(next, false);
+			} else {
+				_switchingToLanguageId = QString();
+			}
+			return;
+		}
 		if (error.type() == "LANG_CODE_NOT_SUPPORTED") {
 			Ui::show(Ui::MakeInformBox(tr::lng_language_not_found()));
 		}
@@ -609,6 +639,8 @@ void CloudManager::switchLangPackId(const Language &data) {
 			&& data.id == DefaultLanguageId());
 	if (!notChanged) {
 		changeIdAndReInitConnection(data);
+		AyuLanguage::init();
+		AyuLanguage::currentInstance()->fetchLanguage(data.id, data.baseId);
 	}
 }
 

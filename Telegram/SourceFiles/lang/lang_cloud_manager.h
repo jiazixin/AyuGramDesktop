@@ -93,6 +93,7 @@ private:
 	mtpRequestId _switchingToLanguageRequest = 0;
 	QString _switchingToLanguageId;
 	bool _switchingToLanguageWarning = false;
+	int _defaultChineseAttempt = 0;
 
 	mtpRequestId _getKeysForSwitchRequestId = 0;
 
