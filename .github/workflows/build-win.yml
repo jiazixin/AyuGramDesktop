@@ -56,8 +56,10 @@ jobs:
           cmd /c mklink /d "$workspaceAlias" "$buildRoot"
           if ($LASTEXITCODE -ne 0) { throw "Failed to create symlink to $buildRoot" }
           "TBUILD=$workspaceAlias" >> $env:GITHUB_ENV
+          "TBUILD_REAL=$buildRoot" >> $env:GITHUB_ENV
           "TBUILD_VOLUME=$buildVolume" >> $env:GITHUB_ENV
           "REPO_PATH=$workspaceAlias\tdesktop" >> $env:GITHUB_ENV
+          "REAL_REPO_PATH=$buildRoot\tdesktop" >> $env:GITHUB_ENV
           "LIBRARIES_PATH=$workspaceAlias\Libraries\win64" >> $env:GITHUB_ENV
 
       - name: Checkout repository with submodules
@@ -116,16 +118,18 @@ jobs:
           key: win-x64-libs-${{ env.TBUILD_VOLUME }}-${{ env.CACHE_KEY }}
 
       - name: Prepare native libraries
+        if: steps.cache-third-party.outputs.cache-hit != 'true' || steps.cache-libraries.outputs.cache-hit != 'true'
         shell: cmd
-        working-directory: ${{ env.TBUILD }}
+        working-directory: ${{ env.TBUILD_REAL }}
         env:
           GYP_MSVS_OVERRIDE_PATH: C:\Program Files\Microsoft Visual Studio\2022\Enterprise\
           GYP_MSVS_VERSION: 2022
           CARGO_INCREMENTAL: 0
         run: |
-          "%REPO_PATH%\Telegram\build\prepare\win.bat" silent
+          "%REAL_REPO_PATH%\Telegram\build\prepare\win.bat" silent
 
       - name: Prune intermediate object files in Libraries
+        if: steps.cache-libraries.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $before = (Get-PSDrive $env:TBUILD_VOLUME).Free / 1GB
@@ -148,27 +152,28 @@ jobs:
 
       - name: Configure AyuGram Release x64
         shell: cmd
-        working-directory: ${{ env.REPO_PATH }}\Telegram
+        working-directory: ${{ env.REAL_REPO_PATH }}\Telegram
         run: |
           call configure.bat ^
             -G "Ninja Multi-Config" ^
             -D TDESKTOP_API_ID=%TDESKTOP_API_ID% ^
             -D TDESKTOP_API_HASH=%TDESKTOP_API_HASH% ^
             -D CMAKE_CONFIGURATION_TYPES=Release ^
+            -D CMAKE_OBJECT_PATH_MAX=180 ^
             -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
             -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON ^
             -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=
 
       - name: Build AyuGram Release x64
         shell: cmd
-        working-directory: ${{ env.REPO_PATH }}
+        working-directory: ${{ env.REAL_REPO_PATH }}
         run: |
           cmake --build out --config Release --parallel 2 --target Telegram
 
       - name: Package portable Windows build
         shell: pwsh
         run: |
-          $out = "$env:REPO_PATH\out\Release"
+          $out = "$env:REAL_REPO_PATH\out\Release"
           if (!(Test-Path "$out\AyuGram.exe")) {
             throw "Expected $out\AyuGram.exe not found!"
           }
