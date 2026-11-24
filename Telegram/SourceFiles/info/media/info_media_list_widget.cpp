@@ -33,6 +33,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_forum_topic.h"
 #include "data/data_saved_sublist.h"
 #include "history/view/media/history_view_save_document_action.h"
+#include "menu/menu_item_download_files.h"
 #include "history/view/history_view_cursor_state.h"
 #include "history/view/history_view_service_message.h"
 #include "history/history.h"
@@ -1602,6 +1603,15 @@ void ListWidget::showContextMenu(
 					deleteSelected();
 				}),
 				&st::menuIconDelete);
+		}
+		if (!_controller->isDownloads() && !_controller->storiesPeer()) {
+			Menu::AddDownloadFilesAction(
+				_contextMenu.get(),
+				_controller->parentController(),
+				collectSelectedIds(),
+				crl::guard(this, [this] {
+					clearSelected();
+				}));
 		}
 		_contextMenu->addAction(
 			tr::lng_context_clear_selection(tr::now),

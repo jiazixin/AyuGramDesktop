@@ -1,0 +1,214 @@
+name: Build Windows x64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dev
+    paths:
+      - 'Telegram/SourceFiles/**'
+      - '.github/workflows/build-win.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  windows-x64:
+    name: Windows x64 Release
+    runs-on: windows-2022
+    timeout-minutes: 300
+
+    env:
+      TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID || '2040' }}
+      TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH || 'b18441a1ff607e10a989891a5462e627' }}
+
+    steps:
+      - name: Free up disk space
+        shell: pwsh
+        run: |
+          $before = (Get-PSDrive C).Free / 1GB
+          Get-Service docker -ErrorAction SilentlyContinue | Stop-Service -ErrorAction SilentlyContinue
+          wsl --shutdown 2> $null
+          Remove-Item "C:\Android\android-sdk", "C:\Program Files\dotnet", "C:\Miniconda", "C:\msys64", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", "$env:LOCALAPPDATA\Docker", "C:\ProgramData\DockerDesktop", "C:\Program Files\PostgreSQL", "C:\PostgreSQL", "C:\Program Files\MongoDB", "C:\Program Files\MySQL" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item "C:\ghcup", "C:\cabal", "C:\Program Files\LLVM", "C:\vcpkg", "C:\tools\kotlinc", "C:\tools\php", "C:\tools\Apache24", "C:\tools\nginx-*", "C:\selenium", "C:\SeleniumWebDrivers", "C:\Program Files\R", "C:\Program Files (x86)\R", "C:\rtools*", "C:\Program Files\Google\Chrome*", "C:\Program Files (x86)\Google\Chrome*", "C:\Program Files\Mozilla Firefox*", "C:\ProgramData\Package Cache" -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem "C:\ProgramData\Microsoft\VisualStudio\Packages" -Exclude _Instances -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item C:\hostedtoolcache\windows\Go*, C:\hostedtoolcache\windows\Ruby*, C:\hostedtoolcache\windows\PyPy*, C:\hostedtoolcache\windows\Java_*, C:\hostedtoolcache\windows\NuGet* -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host ('C: {0:N1} GB -> {1:N1} GB free' -f $before, ((Get-PSDrive C).Free / 1GB))
+          exit 0
+
+      - name: Prepare build root
+        shell: pwsh
+        run: |
+          $cDrive = [System.IO.DriveInfo]::new('C:\')
+          $dDrive = [System.IO.DriveInfo]::new('D:\')
+          $buildRoot = Join-Path $env:USERPROFILE 'TBuild'
+          $buildVolume = 'C'
+          if ($dDrive.IsReady -and $dDrive.DriveType -eq [System.IO.DriveType]::Fixed -and
+              $dDrive.AvailableFreeSpace -ge 20GB -and
+              $dDrive.AvailableFreeSpace -ge ($cDrive.AvailableFreeSpace + 10GB)) {
+            $buildRoot = 'D:\TBuild'
+            $buildVolume = 'D'
+          }
+          Write-Host "Using $buildRoot (C: $([math]::Round($cDrive.AvailableFreeSpace / 1GB)) GB free, D: $(if ($dDrive.IsReady) { [math]::Round($dDrive.AvailableFreeSpace / 1GB) } else { 'N/A' }) GB free)"
+          New-Item -ItemType Directory -Force (Join-Path $buildRoot 'Libraries') | Out-Null
+          $workspaceAlias = Join-Path $env:GITHUB_WORKSPACE 'TBuild'
+          cmd /c mklink /d "$workspaceAlias" "$buildRoot"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to create symlink to $buildRoot" }
+          "TBUILD=$workspaceAlias" >> $env:GITHUB_ENV
+          "TBUILD_VOLUME=$buildVolume" >> $env:GITHUB_ENV
+          "REPO_PATH=$workspaceAlias\tdesktop" >> $env:GITHUB_ENV
+          "LIBRARIES_PATH=$workspaceAlias\Libraries\win64" >> $env:GITHUB_ENV
+
+      - name: Checkout repository with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          path: TBuild/tdesktop
+
+      - name: Compute SDK and cache key
+        shell: pwsh
+        run: |
+          $doc = Get-Content "$env:REPO_PATH\docs\building-win.md" -Raw
+          if ($doc -match 'with \*\*(?<sdk>[^*]+)\*\* SDK version') {
+            $sdk = $Matches.sdk
+          } else {
+            $sdk = '10.0.26100.0'
+          }
+          $h1 = (Get-FileHash "$env:REPO_PATH\Telegram\build\prepare\prepare.py" -Algorithm SHA256).Hash
+          $h2 = (Get-FileHash "$env:REPO_PATH\Telegram\build\qt_version.py" -Algorithm SHA256).Hash
+          $key = "$sdk-$($h1.Substring(0,12))-$($h2.Substring(0,12))"
+          Write-Host "SDK=$sdk CACHE_KEY=$key"
+          "SDK=$sdk" >> $env:GITHUB_ENV
+          "CACHE_KEY=$key" >> $env:GITHUB_ENV
+          git config --global user.email "builder@example.com"
+          git config --global user.name "AyuGram Builder"
+
+      - name: Setup MSVC x64
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          sdk: ${{ env.SDK }}
+
+      - name: Configure NuGet sources
+        shell: pwsh
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages" 2>&1 | Out-Null
+          nuget sources Update -Name "nuget.org" -Source "https://api.nuget.org/v3/index.json" 2>&1 | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            nuget sources Add -Name "nuget.org" -Source "https://api.nuget.org/v3/index.json" 2>&1 | Out-Null
+          }
+          nuget sources Enable -Name "nuget.org" 2>&1 | Out-Null
+          exit 0
+
+      - name: Restore ThirdParty cache
+        id: cache-third-party
+        uses: actions/cache/restore@v4
+        with:
+          path: TBuild\ThirdParty
+          key: win-x64-third-party-${{ env.TBUILD_VOLUME }}-${{ env.CACHE_KEY }}
+
+      - name: Restore Libraries cache
+        id: cache-libraries
+        uses: actions/cache/restore@v4
+        with:
+          path: TBuild\Libraries\win64
+          key: win-x64-libs-${{ env.TBUILD_VOLUME }}-${{ env.CACHE_KEY }}
+
+      - name: Prepare native libraries
+        shell: cmd
+        working-directory: ${{ env.TBUILD }}
+        env:
+          GYP_MSVS_OVERRIDE_PATH: C:\Program Files\Microsoft Visual Studio\2022\Enterprise\
+          GYP_MSVS_VERSION: 2022
+          CARGO_INCREMENTAL: 0
+        run: |
+          "%REPO_PATH%\Telegram\build\prepare\win.bat" silent
+
+      - name: Prune intermediate object files in Libraries
+        shell: pwsh
+        run: |
+          $before = (Get-PSDrive $env:TBUILD_VOLUME).Free / 1GB
+          Get-ChildItem -Path "$env:LIBRARIES_PATH" -Include *.obj,*.o,*.pdb,*.ilk,*.pch -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+          Write-Host ('Volume {0}: {1:N1} GB -> {2:N1} GB free' -f $env:TBUILD_VOLUME, $before, ((Get-PSDrive $env:TBUILD_VOLUME).Free / 1GB))
+
+      - name: Save ThirdParty cache
+        if: steps.cache-third-party.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: TBuild\ThirdParty
+          key: win-x64-third-party-${{ env.TBUILD_VOLUME }}-${{ env.CACHE_KEY }}
+
+      - name: Save Libraries cache
+        if: steps.cache-libraries.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: TBuild\Libraries\win64
+          key: win-x64-libs-${{ env.TBUILD_VOLUME }}-${{ env.CACHE_KEY }}
+
+      - name: Configure AyuGram Release x64
+        shell: cmd
+        working-directory: ${{ env.REPO_PATH }}\Telegram
+        run: |
+          call configure.bat ^
+            -G "Ninja Multi-Config" ^
+            -D TDESKTOP_API_ID=%TDESKTOP_API_ID% ^
+            -D TDESKTOP_API_HASH=%TDESKTOP_API_HASH% ^
+            -D CMAKE_CONFIGURATION_TYPES=Release ^
+            -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
+            -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON ^
+            -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=
+
+      - name: Build AyuGram Release x64
+        shell: cmd
+        working-directory: ${{ env.REPO_PATH }}
+        run: |
+          cmake --build out --config Release --parallel 2 --target Telegram
+
+      - name: Package portable Windows build
+        shell: pwsh
+        run: |
+          $out = "$env:REPO_PATH\out\Release"
+          if (!(Test-Path "$out\AyuGram.exe")) {
+            throw "Expected $out\AyuGram.exe not found!"
+          }
+          $pkg = Join-Path $env:RUNNER_TEMP "AyuGram-win-x64"
+          $zip = Join-Path $env:RUNNER_TEMP "AyuGram-win-x64-batch-save.zip"
+          New-Item -ItemType Directory -Force $pkg | Out-Null
+          Copy-Item "$out\AyuGram.exe" $pkg
+          $d3d = "$out\modules\x64\d3d\d3dcompiler_47.dll"
+          if (Test-Path $d3d) {
+            New-Item -ItemType Directory -Force "$pkg\modules\x64\d3d" | Out-Null
+            Copy-Item $d3d "$pkg\modules\x64\d3d\d3dcompiler_47.dll"
+          }
+          Compress-Archive -Path "$pkg\*" -DestinationPath $zip -Force
+          Get-Item $zip | Format-List Name, Length
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AyuGram-win-x64-batch-save
+          path: ${{ runner.temp }}\AyuGram-win-x64-batch-save.zip
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v7.2.9-batch-save"
+          $zip = Join-Path $env:RUNNER_TEMP "AyuGram-win-x64-batch-save.zip"
+          $notes = @(
+            "Custom Windows x64 build of AyuGram Desktop v7.2.9 with enhanced batch Save As for selected messages:",
+            "- Right-click selected messages (in chats, topics, saved messages, or shared media) -> **Save As... (N)** / **另存为... (N)**",
+            "- Automatically skips text-only messages instead of hiding the menu item",
+            "- Prompts once for a destination folder (remembers the last chosen folder) and downloads all selected photos, videos, and files into it",
+            "- Auto-generates filenames for unnamed videos/voice/GIFs and auto-numbers duplicate filenames instead of overwriting",
+            "- Tracks downloading files in AyuGram's native Downloads manager",
+            "- Auto-update disabled so official updates won't overwrite this custom build"
+          ) -join "`n"
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $zip --clobber
+          } else {
+            gh release create $tag $zip --title "AyuGram v7.2.9 (Windows x64 - Batch Save As)" --notes $notes
+          }
