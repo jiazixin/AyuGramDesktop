@@ -198,23 +198,25 @@ jobs:
 
       - name: Publish GitHub Release
         shell: pwsh
+        working-directory: ${{ env.REAL_REPO_PATH }}
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           $tag = "v7.2.9-batch-save"
           $zip = Join-Path $env:RUNNER_TEMP "AyuGram-win-x64-batch-save.zip"
           $notes = @(
-            "Custom Windows x64 build of AyuGram Desktop v7.2.9 with enhanced batch Save As for selected messages:",
-            "- Right-click selected messages (in chats, topics, saved messages, or shared media) -> **Save As... (N)** / **另存为... (N)**",
-            "- Automatically skips text-only messages instead of hiding the menu item",
-            "- Prompts once for a destination folder (remembers the last chosen folder) and downloads all selected photos, videos, and files into it",
-            "- Auto-generates filenames for unnamed videos/voice/GIFs and auto-numbers duplicate filenames instead of overwriting",
-            "- Tracks downloading files in AyuGram's native Downloads manager",
-            "- Auto-update disabled so official updates won't overwrite this custom build"
+            "基于官方 AyuGram Desktop v7.2.9 编译的 Windows 64 位便携版，包含多选批量另存为与高并发下载加速优化：",
+            "- **多选批量另存为**：在聊天窗口、话题/回复、收藏夹及右侧共享媒体/文件中选中多条消息，右键点击 **「另存为... (N)」** / **Save As... (N)**",
+            "- **混选纯文字友好**：自动跳过纯文字消息，提取全部图片、视频、文档、语音、动图，弹出文件夹选择器并记住上次目录",
+            "- **防覆盖与原生进度**：无名媒体自动按类型+时间命名，重名自动编号，下载进度接入原生下载管理器",
+            "- **高并发下载加速**（保持 128 KB 分片不变）：单 DC 起步 8 路并发、最高 16 路并发，单连接窗口 1 MB ~ 3 MB（总在途上限 48 MB），连接空闲保活 60 秒",
+            "- **已禁用自动更新**：防止官方推送覆盖此定制版"
           ) -join "`n"
-          gh release view $tag 2>$null
+          gh release view $tag --repo "$env:GH_REPO" 2>$null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $zip --clobber
+            gh release upload $tag $zip --repo "$env:GH_REPO" --clobber
+            gh release edit $tag --repo "$env:GH_REPO" --title "AyuGram v7.2.9 (Windows x64 - Batch Save As & Fast Download)" --notes $notes
           } else {
-            gh release create $tag $zip --title "AyuGram v7.2.9 (Windows x64 - Batch Save As)" --notes $notes
+            gh release create $tag $zip --repo "$env:GH_REPO" --target "$env:GITHUB_SHA" --title "AyuGram v7.2.9 (Windows x64 - Batch Save As & Fast Download)" --notes $notes
           }
