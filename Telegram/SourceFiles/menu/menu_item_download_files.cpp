@@ -94,6 +94,30 @@ void CollectMedia(
 		}
 		return u".webp"_q;
 	}
+	if (document->hasMimeType(u"video/mp4"_q)) {
+		return u".mp4"_q;
+	} else if (document->hasMimeType(u"video/quicktime"_q)) {
+		return u".mov"_q;
+	} else if (document->hasMimeType(u"video/webm"_q)) {
+		return u".webm"_q;
+	} else if (document->hasMimeType(u"video/x-matroska"_q)) {
+		return u".mkv"_q;
+	} else if (document->hasMimeType(u"image/jpeg"_q)) {
+		return u".jpg"_q;
+	} else if (document->hasMimeType(u"image/png"_q)) {
+		return u".png"_q;
+	} else if (document->hasMimeType(u"image/gif"_q)) {
+		return u".gif"_q;
+	} else if (document->hasMimeType(u"image/webp"_q)) {
+		return u".webp"_q;
+	} else if (document->hasMimeType(u"audio/mpeg"_q)
+		|| document->hasMimeType(u"audio/mp3"_q)) {
+		return u".mp3"_q;
+	} else if (document->hasMimeType(u"audio/ogg"_q)) {
+		return u".ogg"_q;
+	} else if (document->hasMimeType(u"audio/mp4"_q)) {
+		return u".m4a"_q;
+	}
 	const auto mimeType = Core::MimeTypeForName(document->mimeString());
 	const auto patterns = mimeType.globPatterns();
 	if (!patterns.isEmpty()) {
@@ -129,17 +153,29 @@ void CollectMedia(
 		not_null<DocumentData*> document,
 		TimeId fallbackDate,
 		int index) {
-	auto name = base::FileNameFromUserString(document->filename()).trimmed();
-	while (name.endsWith('.') || name.endsWith(' ')) {
-		name.chop(1);
+	// Check raw filename BEFORE base::FileNameFromUserString(), because
+	// base::FileNameFromUserString("") returns "_" instead of empty!
+	auto rawName = document->filename().trimmed();
+	while (rawName.endsWith('.') || rawName.endsWith(' ')) {
+		rawName.chop(1);
 	}
-	const auto hasUsableName = !name.isEmpty()
-		&& (name != u"."_q)
-		&& (name != u".."_q)
-		&& !name.startsWith('.');
-	if (!hasUsableName) {
-		const auto ext = (name.startsWith('.') && name.size() > 1)
-			? name
+	QString name;
+	const auto hasUsableName = !rawName.isEmpty()
+		&& (rawName != u"."_q)
+		&& (rawName != u".."_q)
+		&& !rawName.startsWith('.');
+	if (hasUsableName) {
+		name = base::FileNameFromUserString(rawName).trimmed();
+		const auto dotPos = name.lastIndexOf('.');
+		if (dotPos <= 0 || dotPos + 1 >= name.size()) {
+			const auto fallbackExt = DocumentFallbackExtension(document);
+			if (!fallbackExt.isEmpty() && fallbackExt != u".unknown"_q) {
+				name += fallbackExt;
+			}
+		}
+	} else {
+		const auto ext = (rawName.startsWith('.') && rawName.size() > 1)
+			? base::FileNameFromUserString(rawName)
 			: DocumentFallbackExtension(document);
 		const auto prefix = DocumentFallbackPrefix(document);
 		const auto when = document->date
