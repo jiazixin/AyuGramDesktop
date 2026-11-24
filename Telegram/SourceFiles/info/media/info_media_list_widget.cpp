@@ -1542,7 +1542,8 @@ void ListWidget::showContextMenu(
 					std::move(handler),
 					&st::menuIconShowInFolder);
 			}
-			if (_provider->allowSaveFileAs(item, document)) {
+			if (overSelected != SelectionState::OverSelectedItems
+				&& _provider->allowSaveFileAs(item, document)) {
 				HistoryView::AddSaveDocumentAction(
 					Ui::Menu::CreateAddActionCallback(_contextMenu),
 					item,

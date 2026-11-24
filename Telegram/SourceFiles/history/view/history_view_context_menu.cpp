@@ -1859,7 +1859,7 @@ void FillContextMenuItems(
 	AddTopMessageActions(result, request, list);
 	if (lnkPhoto && request.selectedItems.empty()) {
 		AddPhotoActions(result, lnkPhoto, item, list);
-	} else if (lnkDocument) {
+	} else if (lnkDocument && request.selectedItems.empty()) {
 		AddDocumentActions(result, lnkDocument, item, list);
 	} else if (poll) {
 		const auto context = list->elementContext();
