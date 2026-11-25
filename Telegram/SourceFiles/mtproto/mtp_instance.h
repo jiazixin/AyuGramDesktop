@@ -139,6 +139,8 @@ public:
 
 	void restartedByTimeout(ShiftedDcId shiftedDcId);
 	[[nodiscard]] rpl::producer<ShiftedDcId> restartsByTimeout() const;
+	void transportFloodReceived(ShiftedDcId shiftedDcId);
+	[[nodiscard]] rpl::producer<ShiftedDcId> transportFloods() const;
 
 	[[nodiscard]] auto nonPremiumDelayedRequests() const
 		-> rpl::producer<mtpRequestId>;

@@ -2690,6 +2690,22 @@ void SessionPrivate::handleError(int errorCode) {
 	if (errorCode == -404) {
 		destroyTemporaryKey();
 	} else {
+		if (errorCode == -429) {
+			constexpr auto kMinFloodRetryTimeout = 4000;
+			constexpr auto kMaxFloodRetryTimeout = 30000;
+			constexpr auto kFloodRetryJitter = 2000;
+			const auto base = std::clamp(
+				_retryTimeout,
+				kMinFloodRetryTimeout,
+				kMaxFloodRetryTimeout);
+			const auto jitter = int(base::RandomIndex(kFloodRetryJitter + 1));
+			_retryTimeout = base + jitter;
+			const auto instance = _instance;
+			const auto shiftedDcId = _shiftedDcId;
+			InvokeQueued(instance, [=] {
+				instance->transportFloodReceived(shiftedDcId);
+			});
+		}
 		MTP_LOG(_shiftedDcId, ("Restarting after error in connection, error code: %1...").arg(errorCode));
 		return restart();
 	}

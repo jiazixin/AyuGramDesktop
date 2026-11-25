@@ -22,8 +22,11 @@ namespace {
 constexpr auto kKillSessionTimeout = 60 * crl::time(1000);
 constexpr auto kStartWaitedInSession = 8 * kDownloadPartSize;
 constexpr auto kMaxWaitedInSession = 24 * kDownloadPartSize;
-constexpr auto kStartSessionsCount = 8;
-constexpr auto kMaxSessionsCount = 16;
+constexpr auto kMinSessionsCount = 2;
+constexpr auto kStartSessionsCount = 6;
+constexpr auto kMaxSessionsCount = 10;
+constexpr auto kFloodDebounceTimeout = 4 * crl::time(1000);
+constexpr auto kFloodCooldownTimeout = 45 * crl::time(1000);
 constexpr auto kMaxTrackedSessionRemoves = 64;
 constexpr auto kRetryAddSessionTimeout = 8 * crl::time(1000);
 constexpr auto kRetryAddSessionSuccesses = 3;
@@ -126,6 +129,15 @@ DownloadManagerMtproto::DownloadManagerMtproto(not_null<ApiWrap*> api)
 		return MTP::isDownloadDcId(shiftedDcId);
 	}) | rpl::on_next([=](MTP::ShiftedDcId shiftedDcId) {
 		sessionTimedOut(
+			MTP::BareDcId(shiftedDcId),
+			MTP::GetDcIdShift(shiftedDcId));
+	}, _lifetime);
+
+	_api->instance().transportFloods(
+	) | rpl::filter([](MTP::ShiftedDcId shiftedDcId) {
+		return MTP::isDownloadDcId(shiftedDcId);
+	}) | rpl::on_next([=](MTP::ShiftedDcId shiftedDcId) {
+		sessionFlooded(
 			MTP::BareDcId(shiftedDcId),
 			MTP::GetDcIdShift(shiftedDcId));
 	}, _lifetime);
@@ -259,8 +271,10 @@ void DownloadManagerMtproto::requestSucceeded(
 		});
 		return;
 	}
+	const auto now = crl::now();
 	if (amountAtRequestStart == data.maxWaitedAmount
-		&& data.maxWaitedAmount < kMaxWaitedInSession) {
+		&& data.maxWaitedAmount < kMaxWaitedInSession
+		&& now >= dc.floodCooldownUntil) {
 		data.maxWaitedAmount = std::min(
 			data.maxWaitedAmount + kDownloadPartSize,
 			kMaxWaitedInSession);
@@ -286,9 +300,9 @@ void DownloadManagerMtproto::requestSucceeded(
 	} else if (dc.sessions.size() == kMaxSessionsCount) {
 		return;
 	}
-	const auto now = crl::now();
 	const auto delay = (dc.sessionRemoveTimes + 1) * kRetryAddSessionTimeout;
-	if (dc.lastSessionRemove && now < dc.lastSessionRemove + delay) {
+	if ((dc.lastSessionRemove && now < dc.lastSessionRemove + delay)
+		|| (now < dc.floodCooldownUntil)) {
 		return;
 	}
 	dc.sessions.emplace_back();
@@ -322,17 +336,62 @@ void DownloadManagerMtproto::sessionTimedOut(MTP::DcId dcId, int index) {
 	for (auto &session : dc.sessions) {
 		session.successes = 0;
 	}
-	if (dc.sessions.size() == kStartSessionsCount
+	if (dc.sessions.size() <= kStartSessionsCount
 		|| ++dc.timeouts < kRemoveSessionAfterTimeouts) {
 		return;
 	}
 	dc.timeouts = 0;
-	removeSession(dcId);
+	removeSession(dcId, kStartSessionsCount);
 }
 
-void DownloadManagerMtproto::removeSession(MTP::DcId dcId) {
+void DownloadManagerMtproto::sessionFlooded(MTP::DcId dcId, int index) {
+	const auto i = _balanceData.find(dcId);
+	if (i == end(_balanceData)) {
+		return;
+	}
+	auto &dc = i->second;
+	if (index < 0 || index >= int(dc.sessions.size())) {
+		return;
+	}
+	const auto now = crl::now();
+	dc.floodCooldownUntil = std::max(
+		dc.floodCooldownUntil,
+		now + kFloodCooldownTimeout);
+	for (auto &session : dc.sessions) {
+		session.successes = 0;
+		if (session.maxWaitedAmount > kStartWaitedInSession) {
+			session.maxWaitedAmount = kStartWaitedInSession;
+		}
+	}
+	dc.timeouts = 0;
+	if (dc.lastFloodHandled
+		&& (now - dc.lastFloodHandled) < kFloodDebounceTimeout) {
+		return;
+	}
+	dc.lastFloodHandled = now;
+	dc.lastSessionRemove = now;
+	const auto removeCount = (int(dc.sessions.size()) >= kStartSessionsCount + 2)
+		? 2
+		: 1;
+	for (auto k = 0; k != removeCount; ++k) {
+		if (int(dc.sessions.size()) <= kMinSessionsCount) {
+			break;
+		}
+		removeSession(dcId, kMinSessionsCount);
+	}
+	DEBUG_LOG(("Download (%1,%2) transport flood (-429), sessions: %3, cooldown: %4ms"
+		).arg(dcId
+		).arg(index
+		).arg(dc.sessions.size()
+		).arg(kFloodCooldownTimeout));
+}
+
+void DownloadManagerMtproto::removeSession(
+		MTP::DcId dcId,
+		int minSessions) {
 	auto &dc = _balanceData[dcId];
-	Assert(dc.sessions.size() > kStartSessionsCount);
+	Assert(minSessions >= 1);
+	Assert(int(dc.sessions.size()) > minSessions);
 	const auto index = int(dc.sessions.size() - 1);
 	DEBUG_LOG(("Download (%1,%2) removing, now sessions: %3"
 		).arg(dcId
@@ -406,6 +465,9 @@ void DownloadManagerMtproto::killSessions(MTP::DcId dcId) {
 			Assert(sessions[j].requested == 0);
 			sessions[j] = DcSessionBalanceData();
 			api().instance().stopSession(MTP::downloadDcId(dcId, j));
+		}
+		if (sessions.size() < kStartSessionsCount) {
+			sessions.resize(kStartSessionsCount);
 		}
 		dc.sessions = base::take(sessions);
 	}

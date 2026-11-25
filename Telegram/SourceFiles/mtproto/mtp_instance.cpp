@@ -98,6 +98,8 @@ public:
 
 	void restartedByTimeout(ShiftedDcId shiftedDcId);
 	[[nodiscard]] rpl::producer<ShiftedDcId> restartsByTimeout() const;
+	void transportFloodReceived(ShiftedDcId shiftedDcId);
+	[[nodiscard]] rpl::producer<ShiftedDcId> transportFloods() const;
 
 	[[nodiscard]] auto nonPremiumDelayedRequests() const
 	-> rpl::producer<mtpRequestId>;
@@ -244,6 +246,7 @@ private:
 	base::flat_map<ShiftedDcId, std::unique_ptr<Session>> _sessions;
 	std::vector<std::unique_ptr<Session>> _sessionsToDestroy;
 	rpl::event_stream<ShiftedDcId> _restartsByTimeout;
+	rpl::event_stream<ShiftedDcId> _transportFloods;
 
 	std::unique_ptr<ConfigLoader> _configLoader;
 	std::unique_ptr<DomainResolver> _domainResolver;
@@ -558,6 +561,14 @@ void Instance::Private::restartedByTimeout(ShiftedDcId shiftedDcId) {
 
 rpl::producer<ShiftedDcId> Instance::Private::restartsByTimeout() const {
 	return _restartsByTimeout.events();
+}
+
+void Instance::Private::transportFloodReceived(ShiftedDcId shiftedDcId) {
+	_transportFloods.fire_copy(shiftedDcId);
+}
+
+rpl::producer<ShiftedDcId> Instance::Private::transportFloods() const {
+	return _transportFloods.events();
 }
 
 auto Instance::Private::nonPremiumDelayedRequests() const
@@ -1937,6 +1948,14 @@ void Instance::restartedByTimeout(ShiftedDcId shiftedDcId) {
 
 rpl::producer<ShiftedDcId> Instance::restartsByTimeout() const {
 	return _private->restartsByTimeout();
+}
+
+void Instance::transportFloodReceived(ShiftedDcId shiftedDcId) {
+	_private->transportFloodReceived(shiftedDcId);
+}
+
+rpl::producer<ShiftedDcId> Instance::transportFloods() const {
+	return _private->transportFloods();
 }
 
 rpl::producer<mtpRequestId> Instance::nonPremiumDelayedRequests() const {

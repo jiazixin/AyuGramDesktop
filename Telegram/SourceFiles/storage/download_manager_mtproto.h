@@ -94,6 +94,8 @@ private:
 
 		std::vector<DcSessionBalanceData> sessions;
 		crl::time lastSessionRemove = 0;
+		crl::time lastFloodHandled = 0;
+		crl::time floodCooldownUntil = 0;
 		int sessionRemoveIndex = 0;
 		int sessionRemoveTimes = 0;
 		int timeouts = 0; // Since all sessions had successes >= required.
@@ -111,7 +113,8 @@ private:
 
 	void resetGeneration();
 	void sessionTimedOut(MTP::DcId dcId, int index);
-	void removeSession(MTP::DcId dcId);
+	void sessionFlooded(MTP::DcId dcId, int index);
+	void removeSession(MTP::DcId dcId, int minSessions);
 
 	const not_null<ApiWrap*> _api;
 
