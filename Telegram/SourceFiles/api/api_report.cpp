@@ -238,11 +238,19 @@ void ReportSpam(
 		msgIds.push_back(MTP_int(fullId.msg));
 	}
 
-	sender->session().api().request(MTPchannels_ReportSpam(
-		channel->inputChannel(),
-		sender->input(),
-		MTP_vector<MTPint>(msgIds)
-	)).send();
+	constexpr auto kMaxReportSpamIds = 100;
+	for (auto offset = 0;
+		offset < int(msgIds.size());
+		offset += kMaxReportSpamIds) {
+		const auto count = std::min(
+			kMaxReportSpamIds,
+			int(msgIds.size()) - offset);
+		sender->session().api().request(MTPchannels_ReportSpam(
+			channel->inputChannel(),
+			sender->input(),
+			MTP_vector<MTPint>(msgIds.mid(offset, count))
+		)).send();
+	}
 }
 
 } // namespace Api

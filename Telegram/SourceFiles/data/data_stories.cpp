@@ -2195,50 +2195,58 @@ void Stories::toggleInProfileList(
 		return;
 	}
 	const auto api = &_owner->session().api();
-	api->request(MTPstories_TogglePinned(
-		peer->input(),
-		MTP_vector<MTPint>(list),
-		MTP_bool(inProfile)
-	)).done([=](const MTPVector<MTPint> &result) {
-		const auto peerId = peer->id;
-		auto &saved = _saved[peerId];
-		const auto loaded = saved.loaded;
-		const auto lastId = !saved.ids.list.empty()
-			? saved.ids.list.back()
-			: saved.lastId
-			? saved.lastId
-			: std::numeric_limits<StoryId>::max();
-		auto dirty = false;
-		for (const auto &id : result.v) {
-			if (const auto maybeStory = lookup({ peerId, id.v })) {
-				const auto story = *maybeStory;
-				story->setInProfile(inProfile);
-				if (inProfile) {
-					const auto add = loaded || (id.v >= lastId);
-					if (!add) {
-						dirty = true;
-					} else if (InsertSorted(saved.ids.list, id.v)) {
-						if (saved.total >= 0) {
-							++saved.total;
+	constexpr auto kMaxTogglePinnedStories = 100;
+	for (auto offset = 0;
+		offset < int(list.size());
+		offset += kMaxTogglePinnedStories) {
+		const auto count = std::min(
+			kMaxTogglePinnedStories,
+			int(list.size()) - offset);
+		api->request(MTPstories_TogglePinned(
+			peer->input(),
+			MTP_vector<MTPint>(list.mid(offset, count)),
+			MTP_bool(inProfile)
+		)).done([=](const MTPVector<MTPint> &result) {
+			const auto peerId = peer->id;
+			auto &saved = _saved[peerId];
+			const auto loaded = saved.loaded;
+			const auto lastId = !saved.ids.list.empty()
+				? saved.ids.list.back()
+				: saved.lastId
+				? saved.lastId
+				: std::numeric_limits<StoryId>::max();
+			auto dirty = false;
+			for (const auto &id : result.v) {
+				if (const auto maybeStory = lookup({ peerId, id.v })) {
+					const auto story = *maybeStory;
+					story->setInProfile(inProfile);
+					if (inProfile) {
+						const auto add = loaded || (id.v >= lastId);
+						if (!add) {
+							dirty = true;
+						} else if (InsertSorted(saved.ids.list, id.v)) {
+							if (saved.total >= 0) {
+								++saved.total;
+							}
 						}
-					}
-				} else if (RemoveSorted(saved.ids.list, id.v)) {
-					if (saved.total > 0) {
-						--saved.total;
+					} else if (RemoveSorted(saved.ids.list, id.v)) {
+						if (saved.total > 0) {
+							--saved.total;
+						}
+					} else if (!loaded) {
+						dirty = true;
 					}
 				} else if (!loaded) {
 					dirty = true;
 				}
-			} else if (!loaded) {
-				dirty = true;
 			}
-		}
-		if (dirty) {
-			albumIdsLoadMore(peerId, kStoriesAlbumIdSaved);
-		} else {
-			_albumIdsChanged.fire({ peerId, kStoriesAlbumIdSaved });
-		}
-	}).send();
+			if (dirty) {
+				albumIdsLoadMore(peerId, kStoriesAlbumIdSaved);
+			} else {
+				_albumIdsChanged.fire({ peerId, kStoriesAlbumIdSaved });
+			}
+		}).send();
+	}
 }
 
 bool Stories::canTogglePinnedList(

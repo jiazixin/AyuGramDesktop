@@ -17,6 +17,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "apiwrap.h"
 #include "base/openssl_help.h"
 
+#include <limits>
+
 namespace Storage {
 namespace {
 
@@ -189,7 +191,7 @@ void DownloadManagerMtproto::applySettings() {
 			dc.floodCooldownUntil = 0;
 		}
 		while (int(dc.sessions.size()) > maxSessions) {
-			removeSession(dcId, maxSessions);
+			removeSession(dcId, maxSessions, false);
 		}
 		if (now >= dc.floodCooldownUntil) {
 			while (int(dc.sessions.size()) < startSessions) {
@@ -400,15 +402,26 @@ void DownloadManagerMtproto::requestSucceeded(
 		).arg(dc.sessions.size()));
 }
 
-int DownloadManagerMtproto::chooseSessionIndex(MTP::DcId dcId) const {
+int DownloadManagerMtproto::chooseSessionIndex(
+		MTP::DcId dcId,
+		int excludeIndex) const {
 	const auto i = _balanceData.find(dcId);
 	Assert(i != end(_balanceData));
 	const auto &sessions = i->second.sessions;
-	const auto j = ranges::min_element(
-		sessions,
-		ranges::less(),
-		&DcSessionBalanceData::requested);
-	return (j - begin(sessions));
+	Assert(!sessions.empty());
+	auto bestIndex = -1;
+	auto bestRequested = std::numeric_limits<int>::max();
+	for (auto j = 0, count = int(sessions.size()); j != count; ++j) {
+		if (j == excludeIndex) {
+			continue;
+		}
+		if (bestIndex < 0 || sessions[j].requested < bestRequested) {
+			bestIndex = j;
+			bestRequested = sessions[j].requested;
+		}
+	}
+	Assert(bestIndex >= 0);
+	return bestIndex;
 }
 
 void DownloadManagerMtproto::sessionTimedOut(MTP::DcId dcId, int index) {
@@ -488,7 +501,8 @@ void DownloadManagerMtproto::sessionFlooded(MTP::DcId dcId, int index) {
 
 void DownloadManagerMtproto::removeSession(
 		MTP::DcId dcId,
-		int minSessions) {
+		int minSessions,
+		bool penalize) {
 	auto &dc = _balanceData[dcId];
 	Assert(minSessions >= 1);
 	Assert(int(dc.sessions.size()) > minSessions);
@@ -498,19 +512,21 @@ void DownloadManagerMtproto::removeSession(
 		).arg(index
 		).arg(index));
 	auto &queue = _queues[dcId];
-	if (dc.sessionRemoveIndex == index) {
-		dc.sessionRemoveTimes = std::min(
-			dc.sessionRemoveTimes + 1,
-			kMaxTrackedSessionRemoves);
-	} else {
-		dc.sessionRemoveIndex = index;
-		dc.sessionRemoveTimes = 1;
+	if (penalize) {
+		if (dc.sessionRemoveIndex == index) {
+			dc.sessionRemoveTimes = std::min(
+				dc.sessionRemoveTimes + 1,
+				kMaxTrackedSessionRemoves);
+		} else {
+			dc.sessionRemoveIndex = index;
+			dc.sessionRemoveTimes = 1;
+		}
 	}
 	auto &session = dc.sessions.back();
 
 	// Make sure we don't send anything to that session while redirecting.
 	constexpr auto kRedirectSentinel
-		= kMaxPossibleWaitedInSession * int(MTP::kMaxMediaDcCount);
+		= kMaxPossibleWaitedInSession * (int(MTP::kMaxMediaDcCount) + 16);
 	session.requested += kRedirectSentinel;
 	queue.removeSession(index);
 	Assert(session.requested == kRedirectSentinel);
@@ -518,7 +534,9 @@ void DownloadManagerMtproto::removeSession(
 	dc.sessions.pop_back();
 	api().instance().killSession(MTP::downloadDcId(dcId, index));
 
-	dc.lastSessionRemove = crl::now();
+	if (penalize) {
+		dc.lastSessionRemove = crl::now();
+	}
 }
 
 void DownloadManagerMtproto::killSessionsSchedule(MTP::DcId dcId) {
@@ -561,7 +579,14 @@ void DownloadManagerMtproto::killSessions(MTP::DcId dcId) {
 	if (i != end(_balanceData)) {
 		auto &dc = i->second;
 		Assert(dc.totalRequested == 0);
+		const auto now = crl::now();
 		const auto floodCount = dc.floodCount;
+		const auto lastFloodHandled = dc.lastFloodHandled;
+		const auto floodCooldownUntil = dc.floodCooldownUntil;
+		const auto inCooldown = (now < floodCooldownUntil);
+		const auto sessionRemoveIndex = dc.sessionRemoveIndex;
+		const auto sessionRemoveTimes = dc.sessionRemoveTimes;
+		const auto lastSessionRemove = dc.lastSessionRemove;
 		auto sessions = base::take(dc.sessions);
 		dc = DcBalanceData();
 		for (auto j = 0; j != int(sessions.size()); ++j) {
@@ -569,13 +594,21 @@ void DownloadManagerMtproto::killSessions(MTP::DcId dcId) {
 			sessions[j] = DcSessionBalanceData();
 			api().instance().stopSession(MTP::downloadDcId(dcId, j));
 		}
+		const auto minSize = inCooldown ? 1 : ConfiguredStartSessions();
 		const auto targetSize = std::clamp(
 			int(sessions.size()),
-			ConfiguredStartSessions(),
+			minSize,
 			ConfiguredMaxSessions());
 		sessions.resize(targetSize);
 		dc.sessions = base::take(sessions);
 		dc.floodCount = floodCount;
+		dc.lastFloodHandled = lastFloodHandled;
+		if (inCooldown) {
+			dc.floodCooldownUntil = floodCooldownUntil;
+			dc.sessionRemoveIndex = sessionRemoveIndex;
+			dc.sessionRemoveTimes = sessionRemoveTimes;
+			dc.lastSessionRemove = lastSessionRemove;
+		}
 	}
 }
 
@@ -661,7 +694,9 @@ void DownloadMtprotoTask::removeSession(int sessionIndex) {
 	}
 	for (auto &[requestData, bytes] : _cdnUncheckedParts) {
 		if (requestData.sessionIndex == sessionIndex) {
-			const auto newIndex = _owner->chooseSessionIndex(dcId());
+			const auto newIndex = _owner->chooseSessionIndex(
+				dcId(),
+				sessionIndex);
 			Assert(newIndex < sessionIndex);
 			requestData.sessionIndex = newIndex;
 		}
@@ -670,7 +705,9 @@ void DownloadMtprotoTask::removeSession(int sessionIndex) {
 		const auto needMakeRequest = (requestId != _cdnHashesRequestId);
 		cancelRequest(requestId);
 		if (needMakeRequest) {
-			const auto newIndex = _owner->chooseSessionIndex(dcId());
+			const auto newIndex = _owner->chooseSessionIndex(
+				dcId(),
+				sessionIndex);
 			Assert(newIndex < sessionIndex);
 			makeRequest({ offset, newIndex });
 		}

@@ -6,6 +6,7 @@ on:
     branches:
       - dev
     paths:
+      - 'Telegram/CMakeLists.txt'
       - 'Telegram/SourceFiles/**'
       - 'Telegram/build/prepare/**'
       - '.github/workflows/build-win.yml'

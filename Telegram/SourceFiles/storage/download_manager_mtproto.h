@@ -67,7 +67,9 @@ public:
 		int amountAtRequestStart,
 		crl::time timeAtRequestStart);
 	void checkSendNextAfterSuccess(MTP::DcId dcId);
-	[[nodiscard]] int chooseSessionIndex(MTP::DcId dcId) const;
+	[[nodiscard]] int chooseSessionIndex(
+		MTP::DcId dcId,
+		int excludeIndex = -1) const;
 
 	void notifyNonPremiumDelay(DocumentId id) {
 		_nonPremiumDelays.fire_copy(id);
@@ -127,7 +129,10 @@ private:
 	void resetGeneration();
 	void sessionTimedOut(MTP::DcId dcId, int index);
 	void sessionFlooded(MTP::DcId dcId, int index);
-	void removeSession(MTP::DcId dcId, int minSessions);
+	void removeSession(
+		MTP::DcId dcId,
+		int minSessions,
+		bool penalize = true);
 
 	const not_null<ApiWrap*> _api;
 

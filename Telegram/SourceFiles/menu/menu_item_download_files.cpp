@@ -52,6 +52,11 @@ using Photos = std::vector<std::pair<not_null<PhotoData*>, FullMsgId>>;
 	return result;
 }
 
+[[nodiscard]] base::flat_set<QString> &ActivePendingSavePaths() {
+	static auto result = base::flat_set<QString>();
+	return result;
+}
+
 void CollectMedia(
 		HistoryItem *item,
 		Documents &documents,
@@ -214,9 +219,10 @@ void CollectMedia(
 		const QString &folderPath,
 		const QString &fileName,
 		base::flat_set<QString> &usedPaths) {
-	const auto normalizedDir = folderPath.endsWith('/')
-		? folderPath
-		: (folderPath + '/');
+	const auto cleanDir = QDir::fromNativeSeparators(folderPath);
+	const auto normalizedDir = cleanDir.endsWith('/')
+		? cleanDir
+		: (cleanDir + '/');
 	const auto extPos = fileName.lastIndexOf('.');
 	const auto stem = (extPos > 0) ? fileName.left(extPos) : fileName;
 	const auto ext = (extPos > 0) ? fileName.mid(extPos) : QString();
@@ -303,50 +309,78 @@ void AddAction(
 		}
 		QDir().mkpath(path);
 
-		auto views = std::vector<std::shared_ptr<Data::PhotoMedia>>();
-		auto dates = std::vector<TimeId>();
-		auto targetPaths = std::vector<QString>();
-		views.reserve(photos.size());
-		dates.reserve(photos.size());
-		targetPaths.reserve(photos.size());
-		auto photoIndex = 0;
-		for (const auto &[photo, fullId] : photos) {
-			if (const auto view = photo->createMediaView()) {
-				view->wanted(Data::PhotoSize::Large, fullId);
-				views.push_back(view);
-				const auto photoDate = photo->date();
-				const auto item = session->data().message(fullId);
-				const auto when = photoDate
-					? photoDate
-					: (item ? item->date() : TimeId(0));
-				dates.push_back(when);
-				++photoIndex;
-				targetPaths.push_back(ReserveUniqueFilePath(
-					path,
-					ResolvePhotoFileName(when, photoIndex),
-					*usedPaths));
-			}
-		}
+		struct PhotoSaveEntry {
+			not_null<PhotoData*> photo;
+			FullMsgId fullId;
+			QString targetPath;
+			QString pendingKey;
+			TimeId date = 0;
+			std::shared_ptr<Data::PhotoMedia> view;
+			bool started = false;
+			bool finished = false;
+		};
+		struct PhotoBatchState {
+			std::vector<PhotoSaveEntry> entries;
+			int nextToStart = 0;
+			int activeCount = 0;
+			int finishedCount = 0;
+			bool pumping = false;
+			bool pendingPump = false;
+			QString lastPath;
+			rpl::lifetime lifetime;
 
-		const auto finalCheck = [=] {
-			for (const auto &[photo, _] : photos) {
-				if (photo->loading()) {
-					return false;
+			~PhotoBatchState() {
+				auto &pending = ActivePendingSavePaths();
+				for (const auto &entry : entries) {
+					if (!entry.finished && !entry.pendingKey.isEmpty()) {
+						pending.remove(entry.pendingKey);
+					}
 				}
 			}
-			return true;
 		};
 
-		const auto saveToFiles = [=] {
-			auto lastPath = QString();
-			for (auto i = 0; i < int(views.size()); ++i) {
-				const auto &filePath = targetPaths[i];
-				if (views[i]->saveToFile(filePath)) {
-					lastPath = filePath;
-					if (dates[i] > 0) {
-						auto f = QFile(filePath);
+		const auto state = std::make_shared<PhotoBatchState>();
+		state->entries.reserve(photos.size());
+		auto photoIndex = 0;
+		auto &pendingPaths = ActivePendingSavePaths();
+		for (const auto &[photo, fullId] : photos) {
+			const auto photoDate = photo->date();
+			const auto item = session->data().message(fullId);
+			const auto when = photoDate
+				? photoDate
+				: (item ? item->date() : TimeId(0));
+			++photoIndex;
+			const auto targetPath = ReserveUniqueFilePath(
+				path,
+				ResolvePhotoFileName(when, photoIndex),
+				*usedPaths);
+			const auto pendingKey = targetPath.toLower();
+			pendingPaths.emplace(pendingKey);
+			state->entries.push_back(PhotoSaveEntry{
+				.photo = photo,
+				.fullId = fullId,
+				.targetPath = targetPath,
+				.pendingKey = pendingKey,
+				.date = when,
+			});
+		}
+
+		const auto photoCount = int(photos.size());
+		const auto pump = [=] {
+			constexpr auto kMaxConcurrentPhotos = 16;
+			const auto keepAlive = state;
+			if (state->pumping) {
+				state->pendingPump = true;
+				return;
+			}
+			state->pumping = true;
+			const auto finishEntry = [&](PhotoSaveEntry &entry) {
+				if (entry.view && entry.view->saveToFile(entry.targetPath)) {
+					state->lastPath = entry.targetPath;
+					if (entry.date > 0) {
+						auto f = QFile(entry.targetPath);
 						if (f.open(QIODevice::ReadWrite)) {
-							const auto when = base::unixtime::parse(dates[i]);
+							const auto when = base::unixtime::parse(entry.date);
 							f.setFileTime(
 								when,
 								QFileDevice::FileModificationTime);
@@ -356,30 +390,64 @@ void AddAction(
 						}
 					}
 				}
-			}
-			if (shouldShowPhotoToast && !lastPath.isEmpty()) {
-				if (const auto strong = weak.get()) {
-					ShowFolderSavedToast(
-						strong,
-						lastPath,
-						int(photos.size()),
-						customFolder,
-						true);
+				if (!entry.pendingKey.isEmpty()) {
+					ActivePendingSavePaths().remove(entry.pendingKey);
+					entry.pendingKey.clear();
 				}
+				entry.view.reset();
+				entry.finished = true;
+				++state->finishedCount;
+			};
+
+			do {
+				state->pendingPump = false;
+				for (auto i = 0; i < state->nextToStart; ++i) {
+					auto &entry = state->entries[i];
+					if (entry.started && !entry.finished && !entry.photo->loading()) {
+						--state->activeCount;
+						finishEntry(entry);
+					}
+				}
+				while (state->activeCount < kMaxConcurrentPhotos
+					&& state->nextToStart < int(state->entries.size())) {
+					auto &entry = state->entries[state->nextToStart++];
+					entry.started = true;
+					entry.view = entry.photo->createMediaView();
+					if (!entry.view) {
+						finishEntry(entry);
+						continue;
+					}
+					entry.view->wanted(Data::PhotoSize::Large, entry.fullId);
+					if (!entry.photo->loading()) {
+						finishEntry(entry);
+					} else {
+						++state->activeCount;
+					}
+				}
+			} while (state->pendingPump
+				&& state->finishedCount < int(state->entries.size()));
+			state->pumping = false;
+			if (state->finishedCount == int(state->entries.size())) {
+				if (shouldShowPhotoToast && !state->lastPath.isEmpty()) {
+					if (const auto strong = weak.get()) {
+						ShowFolderSavedToast(
+							strong,
+							state->lastPath,
+							photoCount,
+							customFolder,
+							true);
+					}
+				}
+				state->lifetime.destroy();
 			}
 		};
 
-		if (finalCheck()) {
-			saveToFiles();
-		} else {
-			auto lifetime = std::make_shared<rpl::lifetime>();
+		pump();
+		if (state->finishedCount < int(state->entries.size())) {
 			session->downloaderTaskFinished(
-			) | rpl::on_next([=]() mutable {
-				if (finalCheck()) {
-					saveToFiles();
-					base::take(lifetime)->destroy();
-				}
-			}, *lifetime);
+			) | rpl::on_next([=] {
+				pump();
+			}, state->lifetime);
 		}
 	};
 
@@ -447,6 +515,15 @@ void AddAction(
 
 	const auto save = [=](const QString &folderPath) {
 		const auto usedPaths = std::make_shared<base::flat_set<QString>>();
+		for (const auto &entry : Core::App().downloadManager().loadingList()) {
+			if (!entry->done && !entry->path.isEmpty()) {
+				usedPaths->emplace(
+					QDir::fromNativeSeparators(entry->path).toLower());
+			}
+		}
+		for (const auto &pending : ActivePendingSavePaths()) {
+			usedPaths->emplace(pending);
+		}
 		saveImages(folderPath, usedPaths);
 		saveDocuments(folderPath, usedPaths);
 		if (callback) {

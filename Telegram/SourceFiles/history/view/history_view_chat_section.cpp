@@ -5133,6 +5133,9 @@ ShiftRangeFetchTarget ChatWidget::listShiftRangeFetchTarget() const {
 		return {};
 	}
 	if (_repliesRootId) {
+		if (!IsServerMsgId(_repliesRootId)) {
+			return {};
+		}
 		return {
 			.peer = _history->peer.get(),
 			.repliesRootId = _repliesRootId,

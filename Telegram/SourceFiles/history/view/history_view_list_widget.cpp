@@ -1722,6 +1722,7 @@ void ListWidget::removeItemSelection(
 		const SelectedMap::const_iterator &i) {
 	Expects(i != _selected.cend());
 
+	cancelShiftRangeFetch();
 	const auto removedId = i->first;
 	_selected.erase(i);
 	if (_selected.empty() || _shiftSelectionAnchor == removedId) {
@@ -1891,9 +1892,11 @@ void ListWidget::changeSelectionAsGroup(
 		}
 		return true;
 	}();
-	if (action == SelectAction::Select && canSelect) {
-		for (const auto &other : group->items) {
-			addToSelection(applyTo, other);
+	if (action == SelectAction::Select) {
+		if (canSelect) {
+			for (const auto &other : group->items) {
+				addToSelection(applyTo, other);
+			}
 		}
 	} else {
 		for (const auto &other : group->items) {
@@ -1946,6 +1949,9 @@ void ListWidget::fetchShiftRangePage(
 			return;
 		}
 		_shiftRangeRequestId = 0;
+		if (!hasSelectedItems()) {
+			return;
+		}
 
 		auto &owner = session().data();
 		const auto list = result.match([&](
@@ -1986,6 +1992,8 @@ void ListWidget::fetchShiftRangePage(
 					&& matchesThread
 					&& item->id > loId
 					&& item->id < hiId) {
+					const auto wasSelected = isSelectedAsGroup(_selected, item);
+					const auto beforeSize = _selected.size();
 					changeSelectionAsGroup(
 						_selected,
 						item,
@@ -1993,6 +2001,27 @@ void ListWidget::fetchShiftRangePage(
 					if (int(_selected.size()) >= MaxSelectedItems) {
 						hitLimit = true;
 						break;
+					}
+					if (!wasSelected && _selected.size() == beforeSize) {
+						if (const auto group = owner.groups().find(item)) {
+							auto toAdd = 0;
+							auto allGood = true;
+							for (const auto &other : group->items) {
+								if (!_delegate->listIsItemGoodForSelection(other)
+									|| isMessageHidden(other)) {
+									allGood = false;
+									break;
+								}
+								if (!_selected.contains(other->fullId())) {
+									++toAdd;
+								}
+							}
+							if (allGood
+								&& int(_selected.size()) + toAdd > MaxSelectedItems) {
+								hitLimit = true;
+								break;
+							}
+						}
 					}
 				}
 			}
@@ -2002,16 +2031,19 @@ void ListWidget::fetchShiftRangePage(
 		update();
 
 		const auto nextPages = pagesFetched + 1;
-		if (list.isEmpty()
-			|| hitLimit
-			|| int(_selected.size()) >= MaxSelectedItems
+		const auto reachedSelectionLimit = hitLimit
+			|| (int(_selected.size()) >= MaxSelectedItems);
+		const auto reachedRangeEnd = list.isEmpty()
 			|| !hasValidId
-			|| minSeenId.bare <= loId.bare + 1
-			|| minSeenId >= offsetId
-			|| nextPages >= kMaxPages) {
+			|| (minSeenId.bare <= loId.bare + 1)
+			|| (minSeenId >= offsetId);
+		const auto reachedPageLimit = (nextPages >= kMaxPages);
+		if (reachedSelectionLimit || reachedRangeEnd || reachedPageLimit) {
 			if (const auto show = _delegate->listUiShow()) {
-				show->showToast((int(_selected.size()) >= MaxSelectedItems)
+				show->showToast(reachedSelectionLimit
 					? u"已达选择上限，共选中 %1 条消息"_q.arg(_selected.size())
+					: (!reachedRangeEnd && reachedPageLimit)
+					? u"已达单次拉取页数上限，已选中 %1 条消息"_q.arg(_selected.size())
 					: u"跨区间连选完成，共选中 %1 条消息"_q.arg(_selected.size()));
 			}
 			return;
@@ -2024,6 +2056,9 @@ void ListWidget::fetchShiftRangePage(
 			return;
 		}
 		_shiftRangeRequestId = 0;
+		if (!hasSelectedItems()) {
+			return;
+		}
 		pushSelectedItems();
 		update();
 		if (const auto show = _delegate->listUiShow()) {
@@ -2078,15 +2113,26 @@ void ListWidget::selectShiftRange(
 		: nullptr;
 	if (!anchor) {
 		auto minDiff = std::numeric_limits<int64>::max();
-		const auto targetMsg = int64(target->fullId().msg.bare);
+		const auto targetPeer = target->fullId().peer;
+		const auto targetUniversal = peerIsChannel(targetPeer)
+			? int64(target->fullId().msg.bare)
+			: (int64(target->fullId().msg.bare) - ServerMaxMsgId.bare);
+		auto samePeerFound = false;
 		for (const auto &entry : _selected) {
 			const auto selected = session().data().message(entry.first);
 			if (!selected) {
 				continue;
 			}
-			const auto diff = std::abs(
-				int64(entry.first.msg.bare) - targetMsg);
-			if (diff < minDiff) {
+			const auto samePeer = (entry.first.peer == targetPeer);
+			if (samePeerFound && !samePeer) {
+				continue;
+			}
+			const auto selectedUniversal = peerIsChannel(entry.first.peer)
+				? int64(entry.first.msg.bare)
+				: (int64(entry.first.msg.bare) - ServerMaxMsgId.bare);
+			const auto diff = std::abs(selectedUniversal - targetUniversal);
+			if ((samePeer && !samePeerFound) || diff < minDiff) {
+				samePeerFound = samePeerFound || samePeer;
 				minDiff = diff;
 				anchor = selected;
 			}
@@ -2105,6 +2151,28 @@ void ListWidget::selectShiftRange(
 	}
 	if (!_shiftSelectionAnchor) {
 		_shiftSelectionAnchor = anchor->fullId();
+	}
+	if (!asGroup
+		&& anchor->groupId()
+		&& anchor->groupId() == target->groupId()) {
+		if (const auto group = session().data().groups().find(target)) {
+			const auto anchorIt = ranges::find(group->items, not_null{ anchor });
+			const auto targetIt = ranges::find(group->items, target);
+			if (anchorIt != end(group->items) && targetIt != end(group->items)) {
+				const auto fromIt = std::min(anchorIt, targetIt);
+				const auto toIt = std::max(anchorIt, targetIt);
+				for (auto i = fromIt;; ++i) {
+					if (int(_selected.size()) >= MaxSelectedItems) {
+						break;
+					}
+					changeSelection(_selected, *i, SelectAction::Select);
+					if (i == toIt) {
+						break;
+					}
+				}
+				return;
+			}
+		}
 	}
 	const auto viewForGroupOrItem = [&](not_null<HistoryItem*> item) -> Element* {
 		if (const auto view = viewForItem(item)) {
@@ -2128,14 +2196,37 @@ void ListWidget::selectShiftRange(
 			if (toIt < fromIt) {
 				std::swap(fromIt, toIt);
 			}
+			const auto targetGroupId = (!asGroup)
+				? target->groupId()
+				: MessageGroupId();
 			for (auto i = fromIt;; ++i) {
 				if (int(_selected.size()) >= MaxSelectedItems) {
 					break;
 				}
-				changeSelectionAsGroup(
-					_selected,
-					(*i)->data(),
-					SelectAction::Select);
+				const auto item = (*i)->data();
+				if (targetGroupId && item->groupId() == targetGroupId) {
+					if (const auto group = session().data().groups().find(target)) {
+						const auto anchorAfterTarget = (anchor->position() > target->position());
+						for (const auto &other : group->items) {
+							if (int(_selected.size()) >= MaxSelectedItems) {
+								break;
+							}
+							const auto inRange = anchorAfterTarget
+								? (other->position() >= target->position())
+								: (other->position() <= target->position());
+							if (inRange) {
+								changeSelection(_selected, other, SelectAction::Select);
+							}
+						}
+					} else {
+						changeSelection(_selected, target, SelectAction::Select);
+					}
+				} else {
+					changeSelectionAsGroup(
+						_selected,
+						item,
+						SelectAction::Select);
+				}
 				if (i == toIt) {
 					break;
 				}
@@ -2148,6 +2239,7 @@ void ListWidget::selectShiftRange(
 	if (tillPos < fromPos) {
 		std::swap(fromPos, tillPos);
 	}
+	const auto targetGroupId = (!asGroup) ? target->groupId() : MessageGroupId();
 	const auto from = _seenPositions.lower_bound(fromPos);
 	const auto till = _seenPositions.upper_bound(tillPos);
 	for (auto i = from; i != till; ++i) {
@@ -2155,11 +2247,45 @@ void ListWidget::selectShiftRange(
 			break;
 		}
 		if (const auto item = session().data().message(i->fullId)) {
-			changeSelectionAsGroup(_selected, item, SelectAction::Select);
+			if (item == anchor || item == target) {
+				continue;
+			}
+			if (targetGroupId && item->groupId() == targetGroupId) {
+				changeSelection(_selected, item, SelectAction::Select);
+			} else {
+				changeSelectionAsGroup(_selected, item, SelectAction::Select);
+			}
 		}
 	}
-	changeSelectionAsGroup(_selected, anchor, SelectAction::Select);
-	changeSelectionAsGroup(_selected, target, SelectAction::Select);
+	if (isSelectedAsGroup(_selected, anchor) || anchor->groupId() != target->groupId()) {
+		changeSelectionAsGroup(_selected, anchor, SelectAction::Select);
+	} else {
+		changeSelection(_selected, anchor, SelectAction::Select);
+	}
+	if (asGroup) {
+		changeSelectionAsGroup(_selected, target, SelectAction::Select);
+	} else if (targetGroupId) {
+		if (const auto group = session().data().groups().find(target)) {
+			const auto anchorAfterTarget = (anchor->position() > target->position());
+			for (const auto &other : group->items) {
+				if (int(_selected.size()) >= MaxSelectedItems) {
+					break;
+				}
+				const auto inRange = anchorAfterTarget
+					? (other->position() >= target->position()
+						&& other->position() <= anchor->position())
+					: (other->position() <= target->position()
+						&& other->position() >= anchor->position());
+				if (inRange) {
+					changeSelection(_selected, other, SelectAction::Select);
+				}
+			}
+		} else {
+			changeSelection(_selected, target, SelectAction::Select);
+		}
+	} else {
+		changeSelection(_selected, target, SelectAction::Select);
+	}
 
 	const auto fetchTarget = _delegate->listShiftRangeFetchTarget();
 	if (fetchTarget
@@ -2169,9 +2295,25 @@ void ListWidget::selectShiftRange(
 		&& IsServerMsgId(target->id)) {
 		const auto loId = std::min(anchor->id, target->id);
 		const auto hiId = std::max(anchor->id, target->id);
-		if (loId.bare + 1 < hiId.bare
+		auto fetchLoId = loId;
+		auto fetchHiId = hiId;
+		if (targetGroupId) {
+			if (const auto group = session().data().groups().find(target)) {
+				for (const auto &other : group->items) {
+					if (!IsServerMsgId(other->id)) {
+						continue;
+					}
+					if (target->id == hiId && other->id < fetchHiId) {
+						fetchHiId = other->id;
+					} else if (target->id == loId && other->id > fetchLoId) {
+						fetchLoId = other->id;
+					}
+				}
+			}
+		}
+		if (fetchLoId.bare + 1 < fetchHiId.bare
 			&& int(_selected.size()) < MaxSelectedItems) {
-			fetchShiftRange(fetchTarget, loId, hiId);
+			fetchShiftRange(fetchTarget, fetchLoId, fetchHiId);
 		}
 	}
 }
@@ -2252,6 +2394,7 @@ void ListWidget::selectItem(not_null<HistoryItem*> item) {
 	if (hasSelectRestriction()) {
 		return;
 	} else if ([[maybe_unused]] const auto view = viewForItem(item)) {
+		cancelShiftRangeFetch();
 		clearTextSelection();
 		changeSelection(
 			_selected,
@@ -2269,6 +2412,7 @@ void ListWidget::selectItemAsGroup(not_null<HistoryItem*> item) {
 	if (hasSelectRestriction()) {
 		return;
 	} else if ([[maybe_unused]] const auto view = viewForItem(item)) {
+		cancelShiftRangeFetch();
 		clearTextSelection();
 		changeSelectionAsGroup(
 			_selected,
@@ -3790,6 +3934,7 @@ bool ListWidget::eventHook(QEvent *e) {
 
 void ListWidget::applyDragSelection() {
 	if (!hasSelectRestriction()) {
+		cancelShiftRangeFetch();
 		const auto selecting = (_dragSelectAction == DragSelectAction::Selecting);
 		const auto lastId = _overState.itemId;
 		applyDragSelection(_selected);
@@ -5311,6 +5456,7 @@ void ListWidget::mouseActionFinish(
 		}
 	} else if (needItemSelectionToggle) {
 		if (const auto item = session().data().message(pressState.itemId)) {
+			cancelShiftRangeFetch();
 			clearTextSelection();
 			if (pressState.pointState == PointState::GroupPart) {
 				const auto toggled = _overItemExact ? _overItemExact : item;
@@ -5345,6 +5491,7 @@ void ListWidget::mouseActionFinish(
 		&& !hasSelectRestriction()) {
 		if (const auto item = session().data().message(pressState.itemId)) {
 			if (_delegate->listIsItemGoodForSelection(item)) {
+				cancelShiftRangeFetch();
 				clearTextSelection();
 				changeSelectionAsGroup(
 					_selected,

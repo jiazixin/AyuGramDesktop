@@ -2573,6 +2573,9 @@ void HistoryInner::itemRemoved(not_null<const HistoryItem*> item) {
 	auto i = _selected.find(item);
 	if (i != _selected.cend()) {
 		_selected.erase(i);
+		if (_selected.empty()) {
+			cancelShiftRangeFetch();
+		}
 		_widget->updateTopBarSelection();
 	}
 
@@ -2698,6 +2701,7 @@ void HistoryInner::mouseActionFinish(
 		}
 		update();
 	} else if (needItemSelectionToggle) {
+		cancelShiftRangeFetch();
 		clearTextSelection();
 		const auto pointState = Element::Moused()
 			? Element::Moused()->pointState(
@@ -2748,6 +2752,7 @@ void HistoryInner::mouseActionFinish(
 	} else if ((_mouseAction == MouseAction::PrepareSelect)
 		&& !_pressWasInactive
 		&& inSelectionMode().inSelectionMode) {
+		cancelShiftRangeFetch();
 		changeSelectionAsGroup(
 			&_selected,
 			_mouseActionItem,
@@ -2764,6 +2769,7 @@ void HistoryInner::mouseActionFinish(
 		&& !hasSelectRestriction()
 		&& _dragStateItem
 		&& _dragStateItem->canBeSelected()) {
+		cancelShiftRangeFetch();
 		clearTextSelection();
 		changeSelectionAsGroup(
 			&_selected,
@@ -2775,6 +2781,7 @@ void HistoryInner::mouseActionFinish(
 		repaintItem(_mouseActionItem);
 	} else if (_mouseAction == MouseAction::Selecting) {
 		if (_dragSelFrom && _dragSelTo) {
+			cancelShiftRangeFetch();
 			const auto lastDragItem = _dragSelTo->data();
 			applyDragSelection();
 			_shiftSelectionAnchor = hasSelectedItems()
@@ -3338,6 +3345,7 @@ void HistoryInner::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 			_menu->addAction(tr::lng_context_select_msg(tr::now), [=] {
 				if (const auto item = session->data().message(itemId)) {
 					if ([[maybe_unused]] const auto view = viewByItem(item)) {
+						cancelShiftRangeFetch();
 						clearTextSelection();
 						if (asGroup) {
 							changeSelectionAsGroup(
@@ -3422,6 +3430,7 @@ void HistoryInner::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 				const auto startId = start->fullId();
 				const auto endId = end->fullId();
 				const auto callback = [=] {
+					cancelShiftRangeFetch();
 					const auto from = session->data().message(startId);
 					const auto to = session->data().message(endId);
 					if (from && to) {
@@ -6204,10 +6213,11 @@ void HistoryInner::changeSelection(
 	}
 	auto total = int(toItems->size());
 	const auto add = (action == SelectAction::Select);
-	if (add
-		&& goodForSelection(toItems, item, total)
-		&& total <= MaxSelectedItems) {
-		addToSelection(toItems, item);
+	if (add) {
+		if (goodForSelection(toItems, item, total)
+			&& total <= MaxSelectedItems) {
+			addToSelection(toItems, item);
+		}
 	} else {
 		removeFromSelection(toItems, item);
 	}
@@ -6235,9 +6245,11 @@ void HistoryInner::changeSelectionAsGroup(
 		}
 		return (total <= MaxSelectedItems);
 	}();
-	if (action == SelectAction::Select && canSelect) {
-		for (const auto &other : group->items) {
-			addToSelection(toItems, other);
+	if (action == SelectAction::Select) {
+		if (canSelect) {
+			for (const auto &other : group->items) {
+				addToSelection(toItems, other);
+			}
 		}
 	} else {
 		for (const auto &other : group->items) {
@@ -6295,6 +6307,9 @@ void HistoryInner::fetchShiftRangePage(
 			return;
 		}
 		_shiftRangeRequestId = 0;
+		if (!hasSelectedItems()) {
+			return;
+		}
 
 		auto &owner = session().data();
 		const auto list = result.match([&](
@@ -6332,6 +6347,8 @@ void HistoryInner::fetchShiftRangePage(
 				if (item->history()->peer == peer
 					&& item->id > loId
 					&& item->id < hiId) {
+					const auto wasSelected = isSelectedAsGroup(&_selected, item);
+					const auto beforeSize = _selected.size();
 					changeSelectionAsGroup(
 						&_selected,
 						item,
@@ -6339,6 +6356,22 @@ void HistoryInner::fetchShiftRangePage(
 					if (int(_selected.size()) >= MaxSelectedItems) {
 						hitLimit = true;
 						break;
+					}
+					if (!wasSelected && _selected.size() == beforeSize) {
+						if (const auto group = owner.groups().find(item)) {
+							auto projected = int(_selected.size());
+							auto allGood = true;
+							for (const auto &other : group->items) {
+								if (!goodForSelection(&_selected, other, projected)) {
+									allGood = false;
+									break;
+								}
+							}
+							if (allGood && projected > MaxSelectedItems) {
+								hitLimit = true;
+								break;
+							}
+						}
 					}
 				}
 			}
@@ -6348,15 +6381,18 @@ void HistoryInner::fetchShiftRangePage(
 		update();
 
 		const auto nextPages = pagesFetched + 1;
-		if (list.isEmpty()
-			|| hitLimit
-			|| int(_selected.size()) >= MaxSelectedItems
+		const auto reachedSelectionLimit = hitLimit
+			|| (int(_selected.size()) >= MaxSelectedItems);
+		const auto reachedRangeEnd = list.isEmpty()
 			|| !hasValidId
-			|| minSeenId.bare <= loId.bare + 1
-			|| minSeenId >= offsetId
-			|| nextPages >= kMaxPages) {
-			_controller->showToast((int(_selected.size()) >= MaxSelectedItems)
+			|| (minSeenId.bare <= loId.bare + 1)
+			|| (minSeenId >= offsetId);
+		const auto reachedPageLimit = (nextPages >= kMaxPages);
+		if (reachedSelectionLimit || reachedRangeEnd || reachedPageLimit) {
+			_controller->showToast(reachedSelectionLimit
 				? u"已达选择上限，共选中 %1 条消息"_q.arg(_selected.size())
+				: (!reachedRangeEnd && reachedPageLimit)
+				? u"已达单次拉取页数上限，已选中 %1 条消息"_q.arg(_selected.size())
 				: u"跨区间连选完成，共选中 %1 条消息"_q.arg(_selected.size()));
 			return;
 		}
@@ -6367,6 +6403,9 @@ void HistoryInner::fetchShiftRangePage(
 			return;
 		}
 		_shiftRangeRequestId = 0;
+		if (!hasSelectedItems()) {
+			return;
+		}
 		_widget->updateTopBarSelection();
 		update();
 		_controller->showToast(
@@ -6440,10 +6479,36 @@ void HistoryInner::selectShiftRange(
 	if (!_shiftSelectionAnchor) {
 		_shiftSelectionAnchor = anchor;
 	}
+	if (!asGroup
+		&& anchor->groupId()
+		&& anchor->groupId() == target->groupId()) {
+		if (const auto group = session().data().groups().find(target)) {
+			const auto anchorIt = ranges::find(group->items, not_null{ anchor });
+			const auto targetIt = ranges::find(group->items, target);
+			if (anchorIt != end(group->items) && targetIt != end(group->items)) {
+				const auto fromIt = std::min(anchorIt, targetIt);
+				const auto toIt = std::max(anchorIt, targetIt);
+				for (auto i = fromIt;; ++i) {
+					if (int(_selected.size()) >= MaxSelectedItems) {
+						break;
+					}
+					changeSelection(&_selected, *i, SelectAction::Select);
+					if (i == toIt) {
+						break;
+					}
+				}
+				return;
+			}
+		}
+	}
 	const auto anchorView = viewByItem(anchor);
 	const auto targetView = viewByItem(target);
 	if (!anchorView || !anchorView->block() || !targetView || !targetView->block()) {
-		changeSelectionAsGroup(&_selected, anchor, SelectAction::Select);
+		if (isSelectedAsGroup(&_selected, anchor) || anchor->groupId() != target->groupId()) {
+			changeSelectionAsGroup(&_selected, anchor, SelectAction::Select);
+		} else {
+			changeSelection(&_selected, anchor, SelectAction::Select);
+		}
 		if (asGroup) {
 			changeSelectionAsGroup(&_selected, target, SelectAction::Select);
 		} else {
@@ -6455,17 +6520,25 @@ void HistoryInner::selectShiftRange(
 			const auto history = target->history();
 			const auto loId = std::min(anchor->id, target->id);
 			const auto hiId = std::max(anchor->id, target->id);
+			const auto targetGroupId = (!asGroup) ? target->groupId() : MessageGroupId();
 			for (const auto &block : history->blocks) {
 				for (const auto &view : block->messages) {
 					const auto item = view->data();
-					if (item->id >= loId && item->id <= hiId) {
+					if (item->id > loId && item->id < hiId) {
 						if (int(_selected.size()) >= MaxSelectedItems) {
 							break;
 						}
-						changeSelectionAsGroup(
-							&_selected,
-							item,
-							SelectAction::Select);
+						if (targetGroupId && item->groupId() == targetGroupId) {
+							changeSelection(
+								&_selected,
+								item,
+								SelectAction::Select);
+						} else {
+							changeSelectionAsGroup(
+								&_selected,
+								item,
+								SelectAction::Select);
+						}
 					}
 				}
 				if (int(_selected.size()) >= MaxSelectedItems) {
@@ -6474,9 +6547,25 @@ void HistoryInner::selectShiftRange(
 			}
 			_widget->updateTopBarSelection();
 			update();
-			if (loId.bare + 1 < hiId.bare
+			auto fetchLoId = loId;
+			auto fetchHiId = hiId;
+			if (targetGroupId) {
+				if (const auto group = session().data().groups().find(target)) {
+					for (const auto &other : group->items) {
+						if (!IsServerMsgId(other->id)) {
+							continue;
+						}
+						if (target->id == hiId && other->id < fetchHiId) {
+							fetchHiId = other->id;
+						} else if (target->id == loId && other->id > fetchLoId) {
+							fetchLoId = other->id;
+						}
+					}
+				}
+			}
+			if (fetchLoId.bare + 1 < fetchHiId.bare
 				&& int(_selected.size()) < MaxSelectedItems) {
-				fetchShiftRange(history->peer, loId, hiId);
+				fetchShiftRange(history->peer, fetchLoId, fetchHiId);
 			}
 		}
 		return;
@@ -6490,10 +6579,50 @@ void HistoryInner::selectShiftRange(
 	const auto fromItem = fromView->indexInBlock();
 	const auto toBlock = toView->block()->indexInHistory();
 	const auto toItem = toView->indexInBlock();
-	if (_migrated && fromView->history() == _migrated) {
-		if (toView->history() == _migrated) {
+	const auto targetGroupId = (!asGroup) ? target->groupId() : MessageGroupId();
+	const auto addRange = [&](
+			not_null<History*> history,
+			int fromblock,
+			int fromitem,
+			int toblock,
+			int toitem) {
+		if (!targetGroupId) {
 			addSelectionRange(
 				&_selected,
+				history,
+				fromblock,
+				fromitem,
+				toblock,
+				toitem);
+			return;
+		}
+		if (fromblock >= 0 && fromitem >= 0 && toblock >= 0 && toitem >= 0) {
+			for (; fromblock <= toblock; ++fromblock) {
+				auto block = history->blocks[fromblock].get();
+				const auto cnt = (fromblock < toblock)
+					? int(block->messages.size())
+					: (toitem + 1);
+				for (; fromitem < cnt; ++fromitem) {
+					const auto item = block->messages[fromitem]->data();
+					if (item->groupId() == targetGroupId) {
+						changeSelection(&_selected, item, SelectAction::Select);
+					} else {
+						changeSelectionAsGroup(
+							&_selected,
+							item,
+							SelectAction::Select);
+					}
+					if (int(_selected.size()) >= MaxSelectedItems) {
+						return;
+					}
+				}
+				fromitem = 0;
+			}
+		}
+	};
+	if (_migrated && fromView->history() == _migrated) {
+		if (toView->history() == _migrated) {
+			addRange(
 				_migrated,
 				fromBlock,
 				fromItem,
@@ -6502,16 +6631,14 @@ void HistoryInner::selectShiftRange(
 		} else {
 			if (!_migrated->blocks.empty()
 				&& !_migrated->blocks.back()->messages.empty()) {
-				addSelectionRange(
-					&_selected,
+				addRange(
 					_migrated,
 					fromBlock,
 					fromItem,
 					int(_migrated->blocks.size()) - 1,
 					int(_migrated->blocks.back()->messages.size()) - 1);
 			}
-			addSelectionRange(
-				&_selected,
+			addRange(
 				_history,
 				0,
 				0,
@@ -6519,8 +6646,7 @@ void HistoryInner::selectShiftRange(
 				toItem);
 		}
 	} else {
-		addSelectionRange(
-			&_selected,
+		addRange(
 			_history,
 			fromBlock,
 			fromItem,

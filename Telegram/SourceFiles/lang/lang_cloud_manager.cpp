@@ -176,13 +176,13 @@ CloudManager::CloudManager(Instance &langpack)
 		*mtpLifetime = account->mtpMainSessionValue(
 		) | rpl::on_next([=](not_null<MTP::Instance*> instance) {
 			_api.emplace(instance);
+			resendRequests();
 			if (_langpack.id().isEmpty()
 				&& _defaultChineseAttempt == 0
 				&& _switchingToLanguageId.isEmpty()) {
 				_defaultChineseAttempt = 1;
 				requestLanguageAndSwitch(DefaultChineseCandidate(0), false);
 			}
-			resendRequests();
 		});
 	}, [=] {
 		_api.reset();
@@ -460,9 +460,13 @@ void CloudManager::sendSwitchingToLanguageRequest() {
 		MTP_string(_switchingToLanguageId)
 	)).done([=](const MTPLangPackLanguage &result) {
 		_switchingToLanguageRequest = 0;
+		const auto isAutoChinese = (_defaultChineseAttempt > 0)
+			&& (_switchingToLanguageId
+				== DefaultChineseCandidate(_defaultChineseAttempt - 1));
+		_switchingToLanguageId = QString();
 		const auto language = Lang::ParseLanguage(result);
 		const auto finalize = [=] {
-			if (canApplyWithoutRestart(language.id)) {
+			if (isAutoChinese || canApplyWithoutRestart(language.id)) {
 				performSwitchAndAddToRecent(language);
 			} else {
 				performSwitchAndRestart(language);

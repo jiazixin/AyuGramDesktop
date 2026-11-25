@@ -14,6 +14,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <utility>
 
 // hard-coded languages
 std::map<QString, QString> langMapping = {
@@ -104,8 +105,21 @@ void AyuLanguage::saveCachedLanguage(const QByteArray &json, const QString &lang
 }
 
 void AyuLanguage::fetchLanguage(const QString &id, const QString &baseId) {
+	if (!id.isEmpty()) {
+		needFallback = false;
+	}
+	if (_chkReply) {
+		const auto old = std::exchange(_chkReply, nullptr);
+		old->disconnect(this);
+		old->abort();
+		old->deleteLater();
+	}
+
 	auto finalLangPackId = langMapping.contains(id) ? langMapping[id] : id;
 	_currentLangId = finalLangPackId.isEmpty() ? baseId : finalLangPackId;
+	if (_currentLangId.isEmpty()) {
+		return;
+	}
 
 	if (Core::App().settings().proxy().isEnabled()) {
 		const auto proxy = Core::App().settings().proxy().selected();
@@ -131,19 +145,21 @@ void AyuLanguage::fetchLanguage(const QString &id, const QString &baseId) {
 }
 
 void AyuLanguage::fetchFinished() {
-	if (!_chkReply) return;
+	if (!_chkReply || sender() != _chkReply) return;
+	const auto reply = std::exchange(_chkReply, nullptr);
+	reply->disconnect(this);
+	reply->deleteLater();
 
 	QString langPackBaseId = Lang::GetInstance().baseId();
 	QString langPackId = Lang::GetInstance().id();
-	auto statusCode = _chkReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+	auto statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
 	if (statusCode == 404 && !langPackId.isEmpty() && !langPackBaseId.isEmpty() && !needFallback) {
 		LOG(("AyuGram Language not found! Fallback to main language: %1...").arg(langPackBaseId));
 		needFallback = true;
-		_chkReply->disconnect();
 		fetchLanguage("", langPackBaseId);
 	} else {
-		const auto result = _chkReply->readAll().trimmed();
+		const auto result = reply->readAll().trimmed();
 		QJsonParseError error{};
 		const auto doc = QJsonDocument::fromJson(result, &error);
 		if (error.error == QJsonParseError::NoError) {
@@ -152,26 +168,27 @@ void AyuLanguage::fetchFinished() {
 		} else {
 			LOG(("Incorrect language JSON File."));
 		}
-
-		_chkReply = nullptr;
 	}
 }
 
 void AyuLanguage::fetchError(QNetworkReply::NetworkError e) {
+	if (!_chkReply || sender() != _chkReply) return;
 	LOG(("Network error: %1").arg(e));
 
 	if (e == QNetworkReply::NetworkError::ContentNotFoundError) {
 		const auto baseId = Lang::GetInstance().baseId();
 		const auto id = Lang::GetInstance().id();
 
+		const auto reply = std::exchange(_chkReply, nullptr);
+		reply->disconnect(this);
+		reply->deleteLater();
+
 		if (!id.isEmpty() && !baseId.isEmpty() && !needFallback) {
 			LOG(("AyuGram Language not found! Fallback to main language: %1...").arg(baseId));
 			needFallback = true;
-			_chkReply->disconnect();
 			fetchLanguage("", baseId);
 		} else {
 			LOG(("AyuGram Language not found!"));
-			_chkReply = nullptr;
 		}
 	}
 }

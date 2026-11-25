@@ -125,7 +125,10 @@ void FillDownloadBoostBox(
 	constexpr auto kCardPadY = 10;
 
 	const auto updateCardLayout = [=] {
-		const auto available = std::max(1, card->width() - kCardPadX * 2);
+		if (card->width() <= kCardPadX * 2) {
+			return;
+		}
+		const auto available = card->width() - kCardPadX * 2;
 		statusLabel->resizeToWidth(available);
 		statusLabel->moveToLeft(kCardPadX, kCardPadY);
 		card->resize(card->width(), statusLabel->height() + kCardPadY * 2);
