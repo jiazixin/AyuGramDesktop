@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "storage/streamed_file_downloader.h"
 
+#include "ayu/ayu_settings.h"
 #include "media/streaming/media_streaming_loader.h"
 #include "media/streaming/media_streaming_reader.h"
 
@@ -16,7 +17,6 @@ namespace {
 using namespace Media::Streaming;
 
 constexpr auto kPartSize = Loader::kPartSize;
-constexpr auto kRequestPartsCount = 80;
 
 } // namespace
 
@@ -85,7 +85,7 @@ Data::FileOrigin StreamedFileDownloader::fileOrigin() const {
 void StreamedFileDownloader::requestParts() {
 	while (!_finished
 		&& _nextPartIndex < _partsCount
-		&& _partsRequested < kRequestPartsCount) {
+		&& _partsRequested < AyuSettings::downloadVideoMaxPartsAtomic()) {
 		requestPart();
 	}
 	_reader->continueDownloaderFromMainThread();

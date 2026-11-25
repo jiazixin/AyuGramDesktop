@@ -527,6 +527,18 @@ private:
 	void selectShiftRange(
 		not_null<HistoryItem*> target,
 		bool asGroup);
+	void cancelShiftRangeFetch();
+	void fetchShiftRange(
+		not_null<PeerData*> peer,
+		MsgId loId,
+		MsgId hiId);
+	void fetchShiftRangePage(
+		not_null<PeerData*> peer,
+		MsgId loId,
+		MsgId hiId,
+		MsgId offsetId,
+		uint64 token,
+		int pagesFetched);
 	void changeAccessibilitySelection(int index, SelectAction action);
 	void extendAccessibilitySelection(int oldIndex, int newIndex);
 	void forwardItem(FullMsgId itemId);
@@ -624,6 +636,8 @@ private:
 	style::cursor _cursor = style::cur_default;
 	SelectedItems _selected;
 	HistoryItem *_shiftSelectionAnchor = nullptr;
+	mtpRequestId _shiftRangeRequestId = 0;
+	uint64 _shiftRangeToken = 0;
 	HistoryItem *_selectedTextItem = nullptr;
 	MessageSelection _selectedTextSelection;
 	TextForMimeData _selectedText;

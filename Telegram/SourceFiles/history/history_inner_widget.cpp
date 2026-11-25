@@ -1378,6 +1378,7 @@ void HistoryInner::setTextSelection(
 		ClickHandler::unpressed();
 	}
 	if (!_selected.empty()) {
+		cancelShiftRangeFetch();
 		_selected.clear();
 		_shiftSelectionAnchor = nullptr;
 		_accessibilitySelectionAnchor = nullptr;
@@ -5067,6 +5068,7 @@ void HistoryInner::setupThanosEffect() {
 }
 
 HistoryInner::~HistoryInner() {
+	cancelShiftRangeFetch();
 	if (_overlayHost) {
 		_overlayHost->hide();
 	}
@@ -5433,6 +5435,9 @@ auto HistoryInner::getSelectionState() const
 }
 
 void HistoryInner::clearSelected(bool onlyTextSelection) {
+	if (!onlyTextSelection) {
+		cancelShiftRangeFetch();
+	}
 	auto changed = false;
 	if (!onlyTextSelection && !_selected.empty()) {
 		_selected.clear();
@@ -6241,9 +6246,138 @@ void HistoryInner::changeSelectionAsGroup(
 	}
 }
 
+void HistoryInner::cancelShiftRangeFetch() {
+	++_shiftRangeToken;
+	if (_shiftRangeRequestId) {
+		session().api().request(base::take(_shiftRangeRequestId)).cancel();
+	}
+}
+
+void HistoryInner::fetchShiftRange(
+		not_null<PeerData*> peer,
+		MsgId loId,
+		MsgId hiId) {
+	cancelShiftRangeFetch();
+	const auto token = _shiftRangeToken;
+	_controller->showToast(u"正在拉取跨区间消息并连选…"_q);
+	fetchShiftRangePage(peer, loId, hiId, hiId, token, 0);
+}
+
+void HistoryInner::fetchShiftRangePage(
+		not_null<PeerData*> peer,
+		MsgId loId,
+		MsgId hiId,
+		MsgId offsetId,
+		uint64 token,
+		int pagesFetched) {
+	constexpr auto kPageLimit = 100;
+	constexpr auto kMaxPages = 200;
+
+	if (_shiftRangeToken != token
+		|| !hasSelectedItems()
+		|| int(_selected.size()) >= MaxSelectedItems
+		|| offsetId.bare <= loId.bare + 1
+		|| pagesFetched >= kMaxPages) {
+		return;
+	}
+
+	_shiftRangeRequestId = session().api().request(MTPmessages_GetHistory(
+		peer->input(),
+		MTP_int(offsetId),
+		MTP_int(0),
+		MTP_int(0),
+		MTP_int(kPageLimit),
+		MTP_int(0),
+		MTP_int(loId),
+		MTP_long(0)
+	)).done(crl::guard(this, [=](const MTPmessages_Messages &result) {
+		if (_shiftRangeToken != token) {
+			return;
+		}
+		_shiftRangeRequestId = 0;
+
+		auto &owner = session().data();
+		const auto list = result.match([&](
+				const MTPDmessages_messagesNotModified &) {
+			return QVector<MTPMessage>();
+		}, [&](const auto &data) {
+			owner.processUsers(data.vusers());
+			owner.processChats(data.vchats());
+			peer->processTopics(data.vtopics());
+			return data.vmessages().v;
+		});
+
+		auto minSeenId = offsetId;
+		auto hasValidId = false;
+		auto hitLimit = false;
+		for (const auto &message : list) {
+			const auto msgId = IdFromMessage(message);
+			if (IsServerMsgId(msgId)) {
+				if (!hasValidId || msgId < minSeenId) {
+					minSeenId = msgId;
+					hasValidId = true;
+				}
+			}
+			if (!IsServerMsgId(msgId) || msgId <= loId || msgId >= offsetId) {
+				continue;
+			}
+			if (int(_selected.size()) >= MaxSelectedItems) {
+				hitLimit = true;
+				break;
+			}
+			if (const auto item = owner.addNewMessage(
+					message,
+					MessageFlags(),
+					NewMessageType::Existing)) {
+				if (item->history()->peer == peer
+					&& item->id > loId
+					&& item->id < hiId) {
+					changeSelectionAsGroup(
+						&_selected,
+						item,
+						SelectAction::Select);
+					if (int(_selected.size()) >= MaxSelectedItems) {
+						hitLimit = true;
+						break;
+					}
+				}
+			}
+		}
+
+		_widget->updateTopBarSelection();
+		update();
+
+		const auto nextPages = pagesFetched + 1;
+		if (list.isEmpty()
+			|| hitLimit
+			|| int(_selected.size()) >= MaxSelectedItems
+			|| !hasValidId
+			|| minSeenId.bare <= loId.bare + 1
+			|| minSeenId >= offsetId
+			|| nextPages >= kMaxPages) {
+			_controller->showToast((int(_selected.size()) >= MaxSelectedItems)
+				? u"已达选择上限，共选中 %1 条消息"_q.arg(_selected.size())
+				: u"跨区间连选完成，共选中 %1 条消息"_q.arg(_selected.size()));
+			return;
+		}
+
+		fetchShiftRangePage(peer, loId, hiId, minSeenId, token, nextPages);
+	})).fail(crl::guard(this, [=](const MTP::Error &) {
+		if (_shiftRangeToken != token) {
+			return;
+		}
+		_shiftRangeRequestId = 0;
+		_widget->updateTopBarSelection();
+		update();
+		_controller->showToast(
+			u"跨区间拉取中断，已选中 %1 条消息"_q.arg(_selected.size()));
+	})).send();
+}
+
 void HistoryInner::selectShiftRange(
 		not_null<HistoryItem*> target,
 		bool asGroup) {
+	cancelShiftRangeFetch();
 	if (!hasSelectedItems()) {
 		if (asGroup) {
 			changeSelectionAsGroup(&_selected, target, SelectAction::Select);
@@ -6272,20 +6406,16 @@ void HistoryInner::selectShiftRange(
 		const auto bi = b->block() ? b->indexInBlock() : -1;
 		return ai < bi;
 	};
-	auto anchor = _shiftSelectionAnchor;
-	auto anchorView = viewByItem(anchor);
-	if (!anchor || !anchorView || !anchorView->block()) {
-		anchor = nullptr;
-		anchorView = nullptr;
+	auto anchor = (_shiftSelectionAnchor
+		&& _selected.contains(not_null(_shiftSelectionAnchor)))
+		? _shiftSelectionAnchor
+		: nullptr;
+	if (!anchor) {
 		auto minDiff = std::numeric_limits<int64>::max();
 		const auto targetUniversal = peerIsChannel(target->fullId().peer)
 			? int64(target->fullId().msg.bare)
 			: (int64(target->fullId().msg.bare) - ServerMaxMsgId.bare);
 		for (const auto &selected : _selected) {
-			const auto view = viewByItem(selected);
-			if (!view || !view->block()) {
-				continue;
-			}
 			const auto selectedUniversal = peerIsChannel(selected->fullId().peer)
 				? int64(selected->fullId().msg.bare)
 				: (int64(selected->fullId().msg.bare) - ServerMaxMsgId.bare);
@@ -6293,12 +6423,10 @@ void HistoryInner::selectShiftRange(
 			if (diff < minDiff) {
 				minDiff = diff;
 				anchor = selected;
-				anchorView = view;
 			}
 		}
 	}
-	const auto targetView = viewByItem(target);
-	if (!anchor || !anchorView || !targetView || !targetView->block()) {
+	if (!anchor) {
 		if (asGroup) {
 			changeSelectionAsGroup(&_selected, target, SelectAction::Select);
 		} else {
@@ -6311,6 +6439,47 @@ void HistoryInner::selectShiftRange(
 	}
 	if (!_shiftSelectionAnchor) {
 		_shiftSelectionAnchor = anchor;
+	}
+	const auto anchorView = viewByItem(anchor);
+	const auto targetView = viewByItem(target);
+	if (!anchorView || !anchorView->block() || !targetView || !targetView->block()) {
+		changeSelectionAsGroup(&_selected, anchor, SelectAction::Select);
+		if (asGroup) {
+			changeSelectionAsGroup(&_selected, target, SelectAction::Select);
+		} else {
+			changeSelection(&_selected, target, SelectAction::Select);
+		}
+		if (anchor->history() == target->history()
+			&& IsServerMsgId(anchor->id)
+			&& IsServerMsgId(target->id)) {
+			const auto history = target->history();
+			const auto loId = std::min(anchor->id, target->id);
+			const auto hiId = std::max(anchor->id, target->id);
+			for (const auto &block : history->blocks) {
+				for (const auto &view : block->messages) {
+					const auto item = view->data();
+					if (item->id >= loId && item->id <= hiId) {
+						if (int(_selected.size()) >= MaxSelectedItems) {
+							break;
+						}
+						changeSelectionAsGroup(
+							&_selected,
+							item,
+							SelectAction::Select);
+					}
+				}
+				if (int(_selected.size()) >= MaxSelectedItems) {
+					break;
+				}
+			}
+			_widget->updateTopBarSelection();
+			update();
+			if (loId.bare + 1 < hiId.bare
+				&& int(_selected.size()) < MaxSelectedItems) {
+				fetchShiftRange(history->peer, loId, hiId);
+			}
+		}
+		return;
 	}
 	auto fromView = anchorView;
 	auto toView = targetView;

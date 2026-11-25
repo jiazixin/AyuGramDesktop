@@ -202,6 +202,8 @@ private:
 	base::Timer _retryTimer; // exp retry timer
 	int _retryTimeout = 1;
 	qint64 _retryWillFinish = 0;
+	crl::time _lastFloodAt = 0;
+	int _floodRetryBase = 0;
 
 	base::Timer _oldConnectionTimer;
 	bool _oldConnection = true;

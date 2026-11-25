@@ -1902,9 +1902,166 @@ void ListWidget::changeSelectionAsGroup(
 	}
 }
 
+void ListWidget::cancelShiftRangeFetch() {
+	++_shiftRangeToken;
+	if (_shiftRangeRequestId) {
+		session().api().request(base::take(_shiftRangeRequestId)).cancel();
+	}
+}
+
+void ListWidget::fetchShiftRange(
+		ShiftRangeFetchTarget target,
+		MsgId loId,
+		MsgId hiId) {
+	cancelShiftRangeFetch();
+	const auto token = _shiftRangeToken;
+	if (const auto show = _delegate->listUiShow()) {
+		show->showToast(u"正在拉取跨区间消息并连选…"_q);
+	}
+	fetchShiftRangePage(target, loId, hiId, hiId, token, 0);
+}
+
+void ListWidget::fetchShiftRangePage(
+		ShiftRangeFetchTarget target,
+		MsgId loId,
+		MsgId hiId,
+		MsgId offsetId,
+		uint64 token,
+		int pagesFetched) {
+	constexpr auto kPageLimit = 100;
+	constexpr auto kMaxPages = 200;
+
+	if (_shiftRangeToken != token
+		|| !target
+		|| !hasSelectedItems()
+		|| int(_selected.size()) >= MaxSelectedItems
+		|| offsetId.bare <= loId.bare + 1
+		|| pagesFetched >= kMaxPages) {
+		return;
+	}
+
+	const auto onDone = crl::guard(this, [=](
+			const MTPmessages_Messages &result) {
+		if (_shiftRangeToken != token) {
+			return;
+		}
+		_shiftRangeRequestId = 0;
+
+		auto &owner = session().data();
+		const auto list = result.match([&](
+				const MTPDmessages_messagesNotModified &) {
+			return QVector<MTPMessage>();
+		}, [&](const auto &data) {
+			owner.processUsers(data.vusers());
+			owner.processChats(data.vchats());
+			target.peer->processTopics(data.vtopics());
+			return data.vmessages().v;
+		});
+
+		auto minSeenId = offsetId;
+		auto hasValidId = false;
+		auto hitLimit = false;
+		for (const auto &message : list) {
+			const auto msgId = IdFromMessage(message);
+			if (IsServerMsgId(msgId)) {
+				if (!hasValidId || msgId < minSeenId) {
+					minSeenId = msgId;
+					hasValidId = true;
+				}
+			}
+			if (!IsServerMsgId(msgId) || msgId <= loId || msgId >= offsetId) {
+				continue;
+			}
+			if (int(_selected.size()) >= MaxSelectedItems) {
+				hitLimit = true;
+				break;
+			}
+			if (const auto item = owner.addNewMessage(
+					message,
+					MessageFlags(),
+					NewMessageType::Existing)) {
+				const auto matchesThread = !target.isReplies
+					|| item->inThread(target.repliesRootId);
+				if (item->history()->peer == target.peer
+					&& matchesThread
+					&& item->id > loId
+					&& item->id < hiId) {
+					changeSelectionAsGroup(
+						_selected,
+						item,
+						SelectAction::Select);
+					if (int(_selected.size()) >= MaxSelectedItems) {
+						hitLimit = true;
+						break;
+					}
+				}
+			}
+		}
+
+		pushSelectedItems();
+		update();
+
+		const auto nextPages = pagesFetched + 1;
+		if (list.isEmpty()
+			|| hitLimit
+			|| int(_selected.size()) >= MaxSelectedItems
+			|| !hasValidId
+			|| minSeenId.bare <= loId.bare + 1
+			|| minSeenId >= offsetId
+			|| nextPages >= kMaxPages) {
+			if (const auto show = _delegate->listUiShow()) {
+				show->showToast((int(_selected.size()) >= MaxSelectedItems)
+					? u"已达选择上限，共选中 %1 条消息"_q.arg(_selected.size())
+					: u"跨区间连选完成，共选中 %1 条消息"_q.arg(_selected.size()));
+			}
+			return;
+		}
+
+		fetchShiftRangePage(target, loId, hiId, minSeenId, token, nextPages);
+	});
+	const auto onFail = crl::guard(this, [=](const MTP::Error &) {
+		if (_shiftRangeToken != token) {
+			return;
+		}
+		_shiftRangeRequestId = 0;
+		pushSelectedItems();
+		update();
+		if (const auto show = _delegate->listUiShow()) {
+			show->showToast(
+				u"跨区间拉取中断，已选中 %1 条消息"_q.arg(_selected.size()));
+		}
+	});
+
+	if (target.isReplies) {
+		_shiftRangeRequestId = session().api().request(MTPmessages_GetReplies(
+			target.peer->input(),
+			MTP_int(target.repliesRootId),
+			MTP_int(offsetId),
+			MTP_int(0),
+			MTP_int(0),
+			MTP_int(kPageLimit),
+			MTP_int(0),
+			MTP_int(loId),
+			MTP_long(0)
+		)).done(onDone).fail(onFail).send();
+	} else {
+		_shiftRangeRequestId = session().api().request(MTPmessages_GetHistory(
+			target.peer->input(),
+			MTP_int(offsetId),
+			MTP_int(0),
+			MTP_int(0),
+			MTP_int(kPageLimit),
+			MTP_int(0),
+			MTP_int(loId),
+			MTP_long(0)
+		)).done(onDone).fail(onFail).send();
+	}
+}
+
 void ListWidget::selectShiftRange(
 		not_null<HistoryItem*> target,
 		bool asGroup) {
+	cancelShiftRangeFetch();
 	if (!hasSelectedItems()) {
 		if (asGroup) {
 			changeSelectionAsGroup(_selected, target, SelectAction::Select);
@@ -1916,7 +2073,7 @@ void ListWidget::selectShiftRange(
 		}
 		return;
 	}
-	auto anchor = _shiftSelectionAnchor
+	auto anchor = (_shiftSelectionAnchor && _selected.contains(_shiftSelectionAnchor))
 		? session().data().message(_shiftSelectionAnchor)
 		: nullptr;
 	if (!anchor) {
@@ -2003,6 +2160,20 @@ void ListWidget::selectShiftRange(
 	}
 	changeSelectionAsGroup(_selected, anchor, SelectAction::Select);
 	changeSelectionAsGroup(_selected, target, SelectAction::Select);
+
+	const auto fetchTarget = _delegate->listShiftRangeFetchTarget();
+	if (fetchTarget
+		&& anchor->history()->peer == fetchTarget.peer
+		&& target->history()->peer == fetchTarget.peer
+		&& IsServerMsgId(anchor->id)
+		&& IsServerMsgId(target->id)) {
+		const auto loId = std::min(anchor->id, target->id);
+		const auto hiId = std::max(anchor->id, target->id);
+		if (loId.bare + 1 < hiId.bare
+			&& int(_selected.size()) < MaxSelectedItems) {
+			fetchShiftRange(fetchTarget, loId, hiId);
+		}
+	}
 }
 
 bool ListWidget::isItemUnderPressSelected() const {
@@ -2210,6 +2381,7 @@ void ListWidget::showEditCaptionUploadLayer(not_null<HistoryItem*> item) {
 }
 
 void ListWidget::clearSelected() {
+	cancelShiftRangeFetch();
 	if (_selected.empty()) {
 		return;
 	}
@@ -6207,6 +6379,7 @@ void ListWidget::overrideChatMode(std::optional<ElementChatMode> mode) {
 }
 
 ListWidget::~ListWidget() {
+	cancelShiftRangeFetch();
 	// Stop listening to session events before any member is destroyed:
 	// ~TranslateTracker reverts translations still in flight, which fires
 	// viewResizeRequest() back into this half-destroyed widget and through

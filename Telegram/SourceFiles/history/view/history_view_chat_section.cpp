@@ -5128,6 +5128,24 @@ bool ChatWidget::listAllowsMultiSelect() {
 	return true;
 }
 
+ShiftRangeFetchTarget ChatWidget::listShiftRangeFetchTarget() const {
+	if (_sublist) {
+		return {};
+	}
+	if (_repliesRootId) {
+		return {
+			.peer = _history->peer.get(),
+			.repliesRootId = _repliesRootId,
+			.isReplies = true,
+		};
+	}
+	return {
+		.peer = _history->peer.get(),
+		.repliesRootId = 0,
+		.isReplies = false,
+	};
+}
+
 bool ChatWidget::listIsItemGoodForSelection(
 		not_null<HistoryItem*> item) {
 	return item->canBeSelected();

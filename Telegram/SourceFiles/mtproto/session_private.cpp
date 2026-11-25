@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mtproto/session_private.h"
 
 #include "core/version.h"
+#include "ayu/ayu_settings.h"
 #include "mtproto/details/mtproto_bound_key_creator.h"
 #include "mtproto/details/mtproto_dcenter.h"
 #include "mtproto/details/mtproto_dump_to_text.h"
@@ -2691,15 +2692,26 @@ void SessionPrivate::handleError(int errorCode) {
 		destroyTemporaryKey();
 	} else {
 		if (errorCode == -429) {
-			constexpr auto kMinFloodRetryTimeout = 4000;
-			constexpr auto kMaxFloodRetryTimeout = 30000;
-			constexpr auto kFloodRetryJitter = 2000;
-			const auto base = std::clamp(
-				_retryTimeout,
-				kMinFloodRetryTimeout,
-				kMaxFloodRetryTimeout);
-			const auto jitter = int(base::RandomIndex(kFloodRetryJitter + 1));
-			_retryTimeout = base + jitter;
+			if (AyuSettings::downloadFloodBackoffEnabledAtomic()) {
+				constexpr auto kMinFloodRetryTimeout = 4000;
+				constexpr auto kMaxFloodRetryTimeout = 30000;
+				constexpr auto kFloodRetryJitter = 2000;
+				constexpr auto kFloodStreakWindow = 60 * crl::time(1000);
+				const auto now = crl::now();
+				if (_lastFloodAt
+					&& (now - _lastFloodAt) < kFloodStreakWindow
+					&& _floodRetryBase > 0) {
+					_floodRetryBase = std::min(
+						_floodRetryBase * 2,
+						kMaxFloodRetryTimeout);
+				} else {
+					_floodRetryBase = kMinFloodRetryTimeout;
+				}
+				_lastFloodAt = now;
+				const auto jitter = int(
+					base::RandomIndex(kFloodRetryJitter + 1));
+				_retryTimeout = _floodRetryBase + jitter;
+			}
 			const auto instance = _instance;
 			const auto shiftedDcId = _shiftedDcId;
 			InvokeQueued(instance, [=] {

@@ -353,6 +353,14 @@ public:
 	[[nodiscard]] int avatarCorners() const { return _avatarCorners.current(); }
 	[[nodiscard]] bool singleCornerRadius() const { return _singleCornerRadius.current(); }
 	[[nodiscard]] bool streamerMode() const { return _streamerMode.current(); }
+	[[nodiscard]] int downloadStartSessions() const { return _downloadStartSessions.current(); }
+	[[nodiscard]] int downloadMaxSessions() const { return _downloadMaxSessions.current(); }
+	[[nodiscard]] int downloadMaxWindowParts() const { return _downloadMaxWindowParts.current(); }
+	[[nodiscard]] int downloadVideoMaxParts() const { return _downloadVideoMaxParts.current(); }
+	[[nodiscard]] bool downloadFloodBackoffEnabled() const { return _downloadFloodBackoffEnabled.current(); }
+
+	[[nodiscard]] static bool downloadFloodBackoffEnabledAtomic();
+	[[nodiscard]] static int downloadVideoMaxPartsAtomic();
 
 	void setSaveDeletedMessages(bool val);
 	void setSaveMessagesHistory(bool val);
@@ -440,6 +448,18 @@ public:
 	void setAvatarCorners(int val);
 	void setSingleCornerRadius(bool val);
 	void setStreamerMode(bool val);
+	void setDownloadStartSessions(int val);
+	void setDownloadMaxSessions(int val);
+	void setDownloadMaxWindowParts(int val);
+	void setDownloadVideoMaxParts(int val);
+	void setDownloadFloodBackoffEnabled(bool val);
+	void setDownloadPreset(
+		int startSessions,
+		int maxSessions,
+		int maxWindowParts,
+		int videoMaxParts,
+		bool floodBackoffEnabled);
+	void resetDownloadSettings();
 
 	[[nodiscard]] rpl::producer<bool> useGlobalGhostModeValue() const { return _useGlobalGhostMode.value(); }
 	[[nodiscard]] rpl::producer<bool> useGlobalGhostModeChanges() const { return _useGlobalGhostMode.changes(); }
@@ -711,6 +731,11 @@ private:
 	rpl::variable<int> _avatarCorners = 23;
 	rpl::variable<bool> _singleCornerRadius = false;
 	rpl::variable<bool> _streamerMode = false;
+	rpl::variable<int> _downloadStartSessions = 6;
+	rpl::variable<int> _downloadMaxSessions = 10;
+	rpl::variable<int> _downloadMaxWindowParts = 24;
+	rpl::variable<int> _downloadVideoMaxParts = 80;
+	rpl::variable<bool> _downloadFloodBackoffEnabled = true;
 
 	rpl::variable<bool> _useGlobalGhostMode = true;
 	std::map<uint64, std::unique_ptr<GhostModeAccountSettings>> _ghostAccounts;

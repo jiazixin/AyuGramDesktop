@@ -15,12 +15,16 @@
 #include "core/application.h"
 #include "features/filters/filters_cache_controller.h"
 #include "features/translator/ayu_translator.h"
+#include "main/main_account.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
 #include "platform/platform_translate_provider.h"
 #include "rpl/combine.h"
+#include "storage/download_manager_mtproto.h"
 #include "window/window_controller.h"
 
+#include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <QApplication>
 
@@ -39,6 +43,35 @@ void repaintApp() {
 }
 
 rpl::lifetime lifetime; // idk reactivity dies when placed in `GhostModeAccountSettings` as field
+
+std::atomic<bool> gDownloadFloodBackoffEnabled{ true };
+std::atomic<int> gDownloadVideoMaxParts{ 80 };
+
+constexpr auto kDefaultDownloadStartSessions = 6;
+constexpr auto kDefaultDownloadMaxSessions = 10;
+constexpr auto kDefaultDownloadMaxWindowParts = 24;
+constexpr auto kDefaultDownloadVideoMaxParts = 80;
+constexpr auto kDefaultDownloadFloodBackoffEnabled = true;
+
+void syncDownloadAtomics(const AyuSettings &s) {
+	gDownloadFloodBackoffEnabled.store(
+		s.downloadFloodBackoffEnabled(),
+		std::memory_order_relaxed);
+	gDownloadVideoMaxParts.store(
+		s.downloadVideoMaxParts(),
+		std::memory_order_relaxed);
+}
+
+void applyDownloadSettingsToAllSessions() {
+	if (!Core::IsAppLaunched() || Core::Quitting()) {
+		return;
+	}
+	for (const auto &account : Core::App().domain().orderedAccounts()) {
+		if (account->sessionExists()) {
+			account->session().downloader().applySettings();
+		}
+	}
+}
 
 } // namespace
 
@@ -428,7 +461,9 @@ void AyuSettings::save() {
 
 void AyuSettings::reset() {
 	getInstance() = AyuSettings();
+	syncDownloadAtomics(getInstance());
 	save();
+	applyDownloadSettingsToAllSessions();
 }
 
 GhostModeAccountSettings &AyuSettings::ghost(not_null<Main::Session*> session) {
@@ -1069,6 +1104,112 @@ void AyuSettings::setStreamerMode(bool val) {
 	save();
 }
 
+bool AyuSettings::downloadFloodBackoffEnabledAtomic() {
+	return gDownloadFloodBackoffEnabled.load(std::memory_order_relaxed);
+}
+
+int AyuSettings::downloadVideoMaxPartsAtomic() {
+	return gDownloadVideoMaxParts.load(std::memory_order_relaxed);
+}
+
+void AyuSettings::setDownloadStartSessions(int val) {
+	const auto clamped = std::clamp(val, 1, 12);
+	auto maxSessions = _downloadMaxSessions.current();
+	auto changed = false;
+	if (clamped > maxSessions) {
+		maxSessions = std::clamp(clamped, 1, 16);
+		_downloadMaxSessions = maxSessions;
+		changed = true;
+	}
+	const auto finalStart = std::min(clamped, maxSessions);
+	if (_downloadStartSessions.current() != finalStart) {
+		_downloadStartSessions = finalStart;
+		changed = true;
+	}
+	if (!changed) {
+		return;
+	}
+	save();
+	applyDownloadSettingsToAllSessions();
+}
+
+void AyuSettings::setDownloadMaxSessions(int val) {
+	const auto clamped = std::clamp(val, 1, 16);
+	auto changed = false;
+	if (_downloadMaxSessions.current() != clamped) {
+		_downloadMaxSessions = clamped;
+		changed = true;
+	}
+	if (_downloadStartSessions.current() > clamped) {
+		_downloadStartSessions = clamped;
+		changed = true;
+	}
+	if (!changed) {
+		return;
+	}
+	save();
+	applyDownloadSettingsToAllSessions();
+}
+
+void AyuSettings::setDownloadMaxWindowParts(int val) {
+	const auto clamped = std::clamp(val, 4, 32);
+	if (_downloadMaxWindowParts.current() == clamped) {
+		return;
+	}
+	_downloadMaxWindowParts = clamped;
+	save();
+	applyDownloadSettingsToAllSessions();
+}
+
+void AyuSettings::setDownloadVideoMaxParts(int val) {
+	const auto clamped = std::clamp(val, 4, 128);
+	if (_downloadVideoMaxParts.current() == clamped) {
+		return;
+	}
+	_downloadVideoMaxParts = clamped;
+	gDownloadVideoMaxParts.store(clamped, std::memory_order_relaxed);
+	save();
+}
+
+void AyuSettings::setDownloadFloodBackoffEnabled(bool val) {
+	if (_downloadFloodBackoffEnabled.current() == val) {
+		return;
+	}
+	_downloadFloodBackoffEnabled = val;
+	gDownloadFloodBackoffEnabled.store(val, std::memory_order_relaxed);
+	save();
+	applyDownloadSettingsToAllSessions();
+}
+
+void AyuSettings::setDownloadPreset(
+		int startSessions,
+		int maxSessions,
+		int maxWindowParts,
+		int videoMaxParts,
+		bool floodBackoffEnabled) {
+	const auto clampedMax = std::clamp(maxSessions, 1, 16);
+	const auto clampedStart = std::clamp(startSessions, 1, std::min(12, clampedMax));
+	const auto clampedWindow = std::clamp(maxWindowParts, 4, 32);
+	const auto clampedVideo = std::clamp(videoMaxParts, 4, 128);
+	_downloadMaxSessions = clampedMax;
+	_downloadStartSessions = clampedStart;
+	_downloadMaxWindowParts = clampedWindow;
+	_downloadVideoMaxParts = clampedVideo;
+	_downloadFloodBackoffEnabled = floodBackoffEnabled;
+	syncDownloadAtomics(*this);
+	save();
+	applyDownloadSettingsToAllSessions();
+}
+
+void AyuSettings::resetDownloadSettings() {
+	setDownloadPreset(
+		kDefaultDownloadStartSessions,
+		kDefaultDownloadMaxSessions,
+		kDefaultDownloadMaxWindowParts,
+		kDefaultDownloadVideoMaxParts,
+		kDefaultDownloadFloodBackoffEnabled);
+}
+
 void to_json(nlohmann::json &j, const AyuSettings &s) {
 	auto ghostAccounts = nlohmann::json::object();
 	for (const auto &[key, value] : s._ghostAccounts) {
@@ -1165,6 +1306,11 @@ void to_json(nlohmann::json &j, const AyuSettings &s) {
 		{"avatarCorners", s._avatarCorners.current()},
 		{"singleCornerRadius", s._singleCornerRadius.current()},
 		{"streamerMode", s._streamerMode.current()},
+		{"downloadStartSessions", s._downloadStartSessions.current()},
+		{"downloadMaxSessions", s._downloadMaxSessions.current()},
+		{"downloadMaxWindowParts", s._downloadMaxWindowParts.current()},
+		{"downloadVideoMaxParts", s._downloadVideoMaxParts.current()},
+		{"downloadFloodBackoffEnabled", s._downloadFloodBackoffEnabled.current()},
 		{"messageShotSettings", s._messageShotSettings}
 	};
 }
@@ -1269,6 +1415,28 @@ void from_json(const nlohmann::json &j, AyuSettings &s) {
 	s._avatarCorners = j.value("avatarCorners", defaults._avatarCorners.current());
 	s._singleCornerRadius = j.value("singleCornerRadius", defaults._singleCornerRadius.current());
 	s._streamerMode = j.value("streamerMode", defaults._streamerMode.current());
+	const auto loadedMaxSessions = std::clamp(
+		j.value("downloadMaxSessions", defaults._downloadMaxSessions.current()),
+		1,
+		16);
+	const auto loadedStartSessions = std::clamp(
+		j.value("downloadStartSessions", defaults._downloadStartSessions.current()),
+		1,
+		std::min(12, loadedMaxSessions));
+	s._downloadMaxSessions = loadedMaxSessions;
+	s._downloadStartSessions = loadedStartSessions;
+	s._downloadMaxWindowParts = std::clamp(
+		j.value("downloadMaxWindowParts", defaults._downloadMaxWindowParts.current()),
+		4,
+		32);
+	s._downloadVideoMaxParts = std::clamp(
+		j.value("downloadVideoMaxParts", defaults._downloadVideoMaxParts.current()),
+		4,
+		128);
+	s._downloadFloodBackoffEnabled = j.value(
+		"downloadFloodBackoffEnabled",
+		defaults._downloadFloodBackoffEnabled.current());
+	syncDownloadAtomics(s);
 
 	if (j.contains("messageShotSettings") && j["messageShotSettings"].is_object()) {
 		j["messageShotSettings"].get_to(s._messageShotSettings);

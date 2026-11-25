@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "media/streaming/media_streaming_reader.h"
 
+#include "ayu/ayu_settings.h"
 #include "media/streaming/media_streaming_common.h"
 #include "media/streaming/media_streaming_loader.h"
 #include "storage/cache/storage_cache_database.h"
@@ -25,7 +26,6 @@ constexpr auto kSlicesInMemory = 2;
 
 // 1 MB of parts are requested from cloud ahead of reading demand.
 constexpr auto kPreloadPartsAhead = 8;
-constexpr auto kDownloaderRequestsLimit = 80;
 
 using PartsMap = base::flat_map<uint32, QByteArray>;
 
@@ -1073,7 +1073,7 @@ void Reader::pruneDoneDownloaderRequests() {
 void Reader::sendDownloaderRequests() {
 	auto &&offsets = ranges::views::all(
 		_offsetsForDownloader
-	) | ranges::views::take(kDownloaderRequestsLimit);
+	) | ranges::views::take(AyuSettings::downloadVideoMaxPartsAtomic());
 	for (const auto offset : offsets) {
 		if ((!_cacheHelper || !downloaderWaitForCachedSlice(offset))
 			&& _downloaderOffsetsRequested.emplace(offset).second) {

@@ -118,6 +118,16 @@ struct MessagesBarData {
 
 using SelectedItems = std::vector<SelectedItem>;
 
+struct ShiftRangeFetchTarget {
+	PeerData *peer = nullptr;
+	MsgId repliesRootId = 0;
+	bool isReplies = false;
+
+	explicit operator bool() const {
+		return (peer != nullptr);
+	}
+};
+
 class ListDelegate {
 public:
 	virtual Context listContext() = 0;
@@ -130,6 +140,9 @@ public:
 		int limitBefore,
 		int limitAfter) = 0;
 	virtual bool listAllowsMultiSelect() = 0;
+	[[nodiscard]] virtual ShiftRangeFetchTarget listShiftRangeFetchTarget() const {
+		return {};
+	}
 	virtual bool listIsItemGoodForSelection(not_null<HistoryItem*> item) = 0;
 	virtual bool listIsLessInOrder(
 		not_null<HistoryItem*> first,
@@ -831,6 +844,18 @@ private:
 	void selectShiftRange(
 		not_null<HistoryItem*> target,
 		bool asGroup);
+	void cancelShiftRangeFetch();
+	void fetchShiftRange(
+		ShiftRangeFetchTarget target,
+		MsgId loId,
+		MsgId hiId);
+	void fetchShiftRangePage(
+		ShiftRangeFetchTarget target,
+		MsgId loId,
+		MsgId hiId,
+		MsgId offsetId,
+		uint64 token,
+		int pagesFetched);
 	void changeAccessibilitySelection(int index, SelectAction action);
 	void extendAccessibilitySelection(int oldIndex, int newIndex);
 	[[nodiscard]] std::vector<not_null<HistoryItem*>> selectionUpTo(
@@ -1035,6 +1060,8 @@ private:
 	KeyboardTextSelection _keyboardTextSelection;
 	SelectedMap _selected;
 	FullMsgId _shiftSelectionAnchor;
+	mtpRequestId _shiftRangeRequestId = 0;
+	uint64 _shiftRangeToken = 0;
 	base::flat_set<Data::MessagePosition> _seenPositions;
 	base::flat_set<FullMsgId> _dragSelected;
 	DragSelectAction _dragSelectAction = DragSelectAction::None;

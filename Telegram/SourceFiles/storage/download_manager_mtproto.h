@@ -31,8 +31,20 @@ class DownloadManagerMtproto final : public base::has_weak_ptr {
 public:
 	using Task = DownloadMtprotoTask;
 
+	struct DcStatus {
+		MTP::DcId dcId = 0;
+		int activeSessions = 0;
+		int maxSessions = 0;
+		int inFlightBytes = 0;
+		int cooldownSecondsLeft = 0;
+		int floodCount = 0;
+	};
+
 	explicit DownloadManagerMtproto(not_null<ApiWrap*> api);
 	~DownloadManagerMtproto();
+
+	void applySettings();
+	[[nodiscard]] std::vector<DcStatus> liveStatus() const;
 
 	[[nodiscard]] ApiWrap &api() const {
 		return *_api;
@@ -96,6 +108,7 @@ private:
 		crl::time lastSessionRemove = 0;
 		crl::time lastFloodHandled = 0;
 		crl::time floodCooldownUntil = 0;
+		int floodCount = 0;
 		int sessionRemoveIndex = 0;
 		int sessionRemoveTimes = 0;
 		int timeouts = 0; // Since all sessions had successes >= required.
