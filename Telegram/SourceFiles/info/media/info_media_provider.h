@@ -61,6 +61,9 @@ public:
 		bool skipFrom,
 		not_null<const HistoryItem*> tillItem,
 		bool skipTill) override;
+	std::vector<not_null<HistoryItem*>> collectSelectionRange(
+		not_null<const HistoryItem*> fromItem,
+		not_null<const HistoryItem*> tillItem) override;
 
 	bool allowSaveFileAs(
 		not_null<const HistoryItem*> item,
@@ -118,6 +121,7 @@ private:
 	SparseIdsMergedSlice _slice;
 
 	std::unordered_map<UniversalMsgId, CachedItem> _layouts;
+	base::flat_set<UniversalMsgId> _seenIds;
 	rpl::event_stream<not_null<BaseLayout*>> _layoutRemoved;
 	rpl::event_stream<> _refreshed;
 

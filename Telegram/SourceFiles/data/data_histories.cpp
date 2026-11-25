@@ -820,25 +820,34 @@ void Histories::deleteMessages(
 		not_null<History*> history,
 		const QVector<MTPint> &ids,
 		bool revoke) {
-	sendRequest(history, RequestType::Delete, [=](Fn<void()> finish) {
-		const auto done = [=](const MTPmessages_AffectedMessages &result) {
-			session().api().applyAffectedMessages(history->peer, result);
-			finish();
-			history->requestChatListMessage();
-		};
-		if (const auto channel = history->peer->asChannel()) {
-			return session().api().request(MTPchannels_DeleteMessages(
-				channel->inputChannel(),
-				MTP_vector<MTPint>(ids)
-			)).done(done).fail(finish).send();
-		} else {
-			using Flag = MTPmessages_DeleteMessages::Flag;
-			return session().api().request(MTPmessages_DeleteMessages(
-				MTP_flags(revoke ? Flag::f_revoke : Flag(0)),
-				MTP_vector<MTPint>(ids)
-			)).done(done).fail(finish).send();
-		}
-	});
+	constexpr auto kMaxDeleteMessagesPerRequest = 100;
+	for (auto offset = 0;
+		offset < int(ids.size());
+		offset += kMaxDeleteMessagesPerRequest) {
+		const auto count = std::min(
+			kMaxDeleteMessagesPerRequest,
+			int(ids.size()) - offset);
+		const auto chunk = ids.mid(offset, count);
+		sendRequest(history, RequestType::Delete, [=](Fn<void()> finish) {
+			const auto done = [=](const MTPmessages_AffectedMessages &result) {
+				session().api().applyAffectedMessages(history->peer, result);
+				finish();
+				history->requestChatListMessage();
+			};
+			if (const auto channel = history->peer->asChannel()) {
+				return session().api().request(MTPchannels_DeleteMessages(
+					channel->inputChannel(),
+					MTP_vector<MTPint>(chunk)
+				)).done(done).fail(finish).send();
+			} else {
+				using Flag = MTPmessages_DeleteMessages::Flag;
+				return session().api().request(MTPmessages_DeleteMessages(
+					MTP_flags(revoke ? Flag::f_revoke : Flag(0)),
+					MTP_vector<MTPint>(chunk)
+				)).done(done).fail(finish).send();
+			}
+		});
+	}
 }
 
 void Histories::deleteAllMessages(
@@ -1025,22 +1034,37 @@ void Histories::deleteMessages(const MessageIdsList &ids, bool revoke) {
 	for (const auto &[history, ids] : idsByPeer) {
 		history->owner().histories().deleteMessages(history, ids, revoke);
 	}
+	constexpr auto kMaxDeleteMessagesPerRequest = 100;
 	for (const auto &[peer, ids] : scheduledIdsByPeer) {
-		peer->session().api().request(MTPmessages_DeleteScheduledMessages(
-			peer->input(),
-			MTP_vector<MTPint>(ids)
-		)).done([peer = peer](const MTPUpdates &result) {
-			peer->session().api().applyUpdates(result);
-		}).send();
+		for (auto offset = 0;
+			offset < int(ids.size());
+			offset += kMaxDeleteMessagesPerRequest) {
+			const auto count = std::min(
+				kMaxDeleteMessagesPerRequest,
+				int(ids.size()) - offset);
+			peer->session().api().request(MTPmessages_DeleteScheduledMessages(
+				peer->input(),
+				MTP_vector<MTPint>(ids.mid(offset, count))
+			)).done([peer = peer](const MTPUpdates &result) {
+				peer->session().api().applyUpdates(result);
+			}).send();
+		}
 	}
 	for (const auto &[shortcutId, ids] : quickIdsByShortcut) {
 		const auto api = &_owner->session().api();
-		api->request(MTPmessages_DeleteQuickReplyMessages(
-			MTP_int(shortcutId),
-			MTP_vector<MTPint>(ids)
-		)).done([=](const MTPUpdates &result) {
-			api->applyUpdates(result);
-		}).send();
+		for (auto offset = 0;
+			offset < int(ids.size());
+			offset += kMaxDeleteMessagesPerRequest) {
+			const auto count = std::min(
+				kMaxDeleteMessagesPerRequest,
+				int(ids.size()) - offset);
+			api->request(MTPmessages_DeleteQuickReplyMessages(
+				MTP_int(shortcutId),
+				MTP_vector<MTPint>(ids.mid(offset, count))
+			)).done([=](const MTPUpdates &result) {
+				api->applyUpdates(result);
+			}).send();
+		}
 	}
 	for (const auto &document : savedMusic) {
 		document->owner().savedMusic().remove(document);

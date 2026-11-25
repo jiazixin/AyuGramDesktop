@@ -796,6 +796,11 @@ void ListWidget::refreshViewer() {
 	) | rpl::on_next([=](Data::MessagesSlice &&slice) {
 		_refreshingViewer = false;
 		std::swap(_slice, slice);
+		for (const auto &id : _slice.ids) {
+			if (const auto item = session().data().message(id)) {
+				_seenPositions.emplace(item->position());
+			}
+		}
 		refreshRows(slice);
 	}, _viewerLifetime);
 }
@@ -1717,7 +1722,11 @@ void ListWidget::removeItemSelection(
 		const SelectedMap::const_iterator &i) {
 	Expects(i != _selected.cend());
 
+	const auto removedId = i->first;
 	_selected.erase(i);
+	if (_selected.empty() || _shiftSelectionAnchor == removedId) {
+		_shiftSelectionAnchor = FullMsgId();
+	}
 	if (_selected.empty()) {
 		update();
 	}
@@ -1893,6 +1902,109 @@ void ListWidget::changeSelectionAsGroup(
 	}
 }
 
+void ListWidget::selectShiftRange(
+		not_null<HistoryItem*> target,
+		bool asGroup) {
+	if (!hasSelectedItems()) {
+		if (asGroup) {
+			changeSelectionAsGroup(_selected, target, SelectAction::Select);
+		} else {
+			changeSelection(_selected, target, SelectAction::Select);
+		}
+		if (_selected.contains(target->fullId())) {
+			_shiftSelectionAnchor = target->fullId();
+		}
+		return;
+	}
+	auto anchor = _shiftSelectionAnchor
+		? session().data().message(_shiftSelectionAnchor)
+		: nullptr;
+	if (!anchor) {
+		auto minDiff = std::numeric_limits<int64>::max();
+		const auto targetMsg = int64(target->fullId().msg.bare);
+		for (const auto &entry : _selected) {
+			const auto selected = session().data().message(entry.first);
+			if (!selected) {
+				continue;
+			}
+			const auto diff = std::abs(
+				int64(entry.first.msg.bare) - targetMsg);
+			if (diff < minDiff) {
+				minDiff = diff;
+				anchor = selected;
+			}
+		}
+	}
+	if (!anchor) {
+		if (asGroup) {
+			changeSelectionAsGroup(_selected, target, SelectAction::Select);
+		} else {
+			changeSelection(_selected, target, SelectAction::Select);
+		}
+		if (_selected.contains(target->fullId())) {
+			_shiftSelectionAnchor = target->fullId();
+		}
+		return;
+	}
+	if (!_shiftSelectionAnchor) {
+		_shiftSelectionAnchor = anchor->fullId();
+	}
+	const auto viewForGroupOrItem = [&](not_null<HistoryItem*> item) -> Element* {
+		if (const auto view = viewForItem(item)) {
+			return view;
+		}
+		if (const auto group = session().data().groups().find(item)) {
+			for (const auto &other : group->items) {
+				if (const auto view = viewForItem(other)) {
+					return view;
+				}
+			}
+		}
+		return nullptr;
+	};
+	const auto anchorView = viewForGroupOrItem(anchor);
+	const auto targetView = viewForGroupOrItem(target);
+	if (anchorView && targetView) {
+		auto fromIt = ranges::find(_items, not_null{ anchorView });
+		auto toIt = ranges::find(_items, not_null{ targetView });
+		if (fromIt != end(_items) && toIt != end(_items)) {
+			if (toIt < fromIt) {
+				std::swap(fromIt, toIt);
+			}
+			for (auto i = fromIt;; ++i) {
+				if (int(_selected.size()) >= MaxSelectedItems) {
+					break;
+				}
+				changeSelectionAsGroup(
+					_selected,
+					(*i)->data(),
+					SelectAction::Select);
+				if (i == toIt) {
+					break;
+				}
+			}
+			return;
+		}
+	}
+	auto fromPos = anchor->position();
+	auto tillPos = target->position();
+	if (tillPos < fromPos) {
+		std::swap(fromPos, tillPos);
+	}
+	const auto from = _seenPositions.lower_bound(fromPos);
+	const auto till = _seenPositions.upper_bound(tillPos);
+	for (auto i = from; i != till; ++i) {
+		if (int(_selected.size()) >= MaxSelectedItems) {
+			break;
+		}
+		if (const auto item = session().data().message(i->fullId)) {
+			changeSelectionAsGroup(_selected, item, SelectAction::Select);
+		}
+	}
+	changeSelectionAsGroup(_selected, anchor, SelectAction::Select);
+	changeSelectionAsGroup(_selected, target, SelectAction::Select);
+}
+
 bool ListWidget::isItemUnderPressSelected() const {
 	return itemUnderPressSelection() != _selected.end();
 }
@@ -1974,6 +2086,9 @@ void ListWidget::selectItem(not_null<HistoryItem*> item) {
 			_selected,
 			item,
 			SelectAction::Select);
+		if (_selected.contains(item->fullId())) {
+			_shiftSelectionAnchor = item->fullId();
+		}
 		_accessibilitySelectionAnchor = nullptr;
 		pushSelectedItems();
 	}
@@ -1988,6 +2103,9 @@ void ListWidget::selectItemAsGroup(not_null<HistoryItem*> item) {
 			_selected,
 			item,
 			SelectAction::Select);
+		if (isSelectedAsGroup(_selected, item)) {
+			_shiftSelectionAnchor = item->fullId();
+		}
 		_accessibilitySelectionAnchor = nullptr;
 		pushSelectedItems();
 		update();
@@ -1998,6 +2116,9 @@ std::vector<not_null<HistoryItem*>> ListWidget::collectBetween(
 		not_null<HistoryItem*> from,
 		not_null<HistoryItem*> to,
 		int max) const {
+	if (max <= 0) {
+		return {};
+	}
 	const auto fromView = viewForItem(from);
 	const auto toView = viewForItem(to);
 	if (!fromView || !toView) {
@@ -2009,7 +2130,7 @@ std::vector<not_null<HistoryItem*>> ListWidget::collectBetween(
 		return {};
 	}
 	auto result = std::vector<not_null<HistoryItem*>>();
-	result.reserve(max);
+	result.reserve(std::min(max, 256));
 	result.push_back(from);
 	result.push_back(to);
 	for (auto i = fromIt + 1; i != toIt; ++i) {
@@ -2092,6 +2213,7 @@ void ListWidget::clearSelected() {
 	if (_selected.empty()) {
 		return;
 	}
+	_shiftSelectionAnchor = FullMsgId();
 	_accessibilitySelectionAnchor = nullptr;
 	if (hasSelectedText()) {
 		repaintItem(_selected.begin()->first);
@@ -3496,7 +3618,14 @@ bool ListWidget::eventHook(QEvent *e) {
 
 void ListWidget::applyDragSelection() {
 	if (!hasSelectRestriction()) {
+		const auto selecting = (_dragSelectAction == DragSelectAction::Selecting);
+		const auto lastId = _overState.itemId;
 		applyDragSelection(_selected);
+		if (selecting && lastId && _selected.contains(lastId)) {
+			_shiftSelectionAnchor = lastId;
+		} else if (_selected.empty()) {
+			_shiftSelectionAnchor = FullMsgId();
+		}
 	}
 	clearDragSelection();
 	pushSelectedItems();
@@ -4801,13 +4930,21 @@ void ListWidget::mouseActionStart(
 	const auto pressElement = _overElement;
 
 	_mouseAction = MouseAction::None;
+	_pressShiftPressed = base::IsShiftPressed();
 	_pressWasInactive = Ui::WasInactivePress(window());
 	if (_pressWasInactive) {
 		Ui::MarkInactivePress(window(), false);
 	}
 
 	const auto pressed = ClickHandler::getPressed();
-	if (pressed
+	if (_pressShiftPressed
+		&& !_pressWasInactive
+		&& _selectEnabled
+		&& !hasSelectRestriction()
+		&& pressElement
+		&& _delegate->listIsItemGoodForSelection(pressElement->data())) {
+		_mouseAction = MouseAction::PrepareSelect;
+	} else if (pressed
 		&& (!_overElement
 			|| _overState.pointState == PointState::Outside
 			|| !_overElement->allowTextSelectionByHandler(pressed))) {
@@ -4929,6 +5066,7 @@ void ListWidget::mouseActionUpdate(const QPoint &globalPosition) {
 void ListWidget::mouseActionCancel() {
 	_pressState = MouseState();
 	_pressItemExact = nullptr;
+	_pressShiftPressed = false;
 	_mouseAction = MouseAction::None;
 	_mouseTextAnchor = TextState();
 	clearDragSelection();
@@ -4942,6 +5080,7 @@ void ListWidget::mouseActionFinish(
 	mouseActionUpdate(globalPosition);
 
 	auto pressState = base::take(_pressState);
+	const auto shiftPressed = base::take(_pressShiftPressed);
 	base::take(_pressItemExact);
 	repaintItem(pressState.itemId);
 
@@ -4958,6 +5097,10 @@ void ListWidget::mouseActionFinish(
 		&& (button != Qt::RightButton)
 		&& (_mouseAction == MouseAction::PrepareSelect
 			|| _mouseAction == MouseAction::PrepareDrag);
+	const auto needShiftSelection = simpleSelectionChange
+		&& shiftPressed
+		&& _selectEnabled
+		&& !hasSelectRestriction();
 	auto needItemSelectionToggle = simpleSelectionChange
 		&& (!activated || toggleByHandler(activated))
 		&& inSelectionMode().inSelectionMode;
@@ -4966,7 +5109,9 @@ void ListWidget::mouseActionFinish(
 
 	_wasSelectedText = false;
 
-	if (_mouseAction == MouseAction::Dragging || needItemSelectionToggle) {
+	if (_mouseAction == MouseAction::Dragging
+		|| needItemSelectionToggle
+		|| needShiftSelection) {
 		activated = nullptr;
 	} else if (activated) {
 		mouseActionCancel();
@@ -4977,19 +5122,47 @@ void ListWidget::mouseActionFinish(
 		});
 		return;
 	}
-	if (needItemSelectionToggle) {
+	if (needShiftSelection) {
+		if (const auto item = session().data().message(pressState.itemId)) {
+			if (_delegate->listIsItemGoodForSelection(item)) {
+				clearTextSelection();
+				if (pressState.pointState == PointState::GroupPart
+					&& _overItemExact
+					&& _delegate->listIsItemGoodForSelection(_overItemExact)) {
+					selectShiftRange(_overItemExact, false);
+				} else {
+					selectShiftRange(item, true);
+				}
+				pushSelectedItems();
+				update();
+			}
+		}
+	} else if (needItemSelectionToggle) {
 		if (const auto item = session().data().message(pressState.itemId)) {
 			clearTextSelection();
 			if (pressState.pointState == PointState::GroupPart) {
+				const auto toggled = _overItemExact ? _overItemExact : item;
 				changeSelection(
 					_selected,
-					_overItemExact ? _overItemExact : item,
+					toggled,
 					SelectAction::Invert);
+				if (_selected.contains(toggled->fullId())) {
+					_shiftSelectionAnchor = toggled->fullId();
+				} else if (_selected.empty()
+					|| _shiftSelectionAnchor == toggled->fullId()) {
+					_shiftSelectionAnchor = FullMsgId();
+				}
 			} else {
 				changeSelectionAsGroup(
 					_selected,
 					item,
 					SelectAction::Invert);
+				if (isSelectedAsGroup(_selected, item)) {
+					_shiftSelectionAnchor = item->fullId();
+				} else if (_selected.empty()
+					|| _shiftSelectionAnchor == item->fullId()) {
+					_shiftSelectionAnchor = FullMsgId();
+				}
 			}
 			pushSelectedItems();
 		}
@@ -5005,6 +5178,9 @@ void ListWidget::mouseActionFinish(
 					_selected,
 					item,
 					SelectAction::Select);
+				if (isSelectedAsGroup(_selected, item)) {
+					_shiftSelectionAnchor = item->fullId();
+				}
 				pushSelectedItems();
 				update();
 			}
@@ -5848,6 +6024,10 @@ void ListWidget::itemRemoved(not_null<const HistoryItem*> item) {
 	if (_accessibilitySelectionAnchor == item) {
 		_accessibilitySelectionAnchor = nullptr;
 	}
+	if (_shiftSelectionAnchor == item->fullId()) {
+		_shiftSelectionAnchor = FullMsgId();
+	}
+	_seenPositions.remove(item->position());
 	_accessibilityIdentities.remove(item);
 	_animatedStickersPlayed.remove(item);
 	const auto i = _views.find(item);

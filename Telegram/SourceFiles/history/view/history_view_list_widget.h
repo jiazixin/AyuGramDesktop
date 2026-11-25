@@ -828,6 +828,9 @@ private:
 		SelectedMap &applyTo,
 		not_null<HistoryItem*> item,
 		SelectAction action) const;
+	void selectShiftRange(
+		not_null<HistoryItem*> target,
+		bool asGroup);
 	void changeAccessibilitySelection(int index, SelectAction action);
 	void extendAccessibilitySelection(int oldIndex, int newIndex);
 	[[nodiscard]] std::vector<not_null<HistoryItem*>> selectionUpTo(
@@ -1021,6 +1024,7 @@ private:
 	CursorState _mouseCursorState = CursorState();
 	TextState _mouseTextAnchor;
 	bool _pressWasInactive = false;
+	bool _pressShiftPressed = false;
 	bool _overSenderUserpic = false;
 	bool _mouseActive = false;
 
@@ -1030,6 +1034,8 @@ private:
 	TextForMimeData _selectedText;
 	KeyboardTextSelection _keyboardTextSelection;
 	SelectedMap _selected;
+	FullMsgId _shiftSelectionAnchor;
+	base::flat_set<Data::MessagePosition> _seenPositions;
 	base::flat_set<FullMsgId> _dragSelected;
 	DragSelectAction _dragSelectAction = DragSelectAction::None;
 	bool _dragSelectDirectionUp = false;

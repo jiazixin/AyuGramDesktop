@@ -524,6 +524,9 @@ private:
 		not_null<SelectedItems*> toItems,
 		not_null<HistoryItem*> item,
 		SelectAction action) const;
+	void selectShiftRange(
+		not_null<HistoryItem*> target,
+		bool asGroup);
 	void changeAccessibilitySelection(int index, SelectAction action);
 	void extendAccessibilitySelection(int oldIndex, int newIndex);
 	void forwardItem(FullMsgId itemId);
@@ -620,6 +623,7 @@ private:
 
 	style::cursor _cursor = style::cur_default;
 	SelectedItems _selected;
+	HistoryItem *_shiftSelectionAnchor = nullptr;
 	HistoryItem *_selectedTextItem = nullptr;
 	MessageSelection _selectedTextSelection;
 	TextForMimeData _selectedText;
@@ -655,6 +659,7 @@ private:
 	bool _mouseActive = false;
 	bool _dragStateUserpic = false;
 	bool _pressWasInactive = false;
+	bool _pressShiftPressed = false;
 	bool _recountedAfterPendingResizedItems = false;
 	bool _useCornerReply = false;
 	bool _useCornerReaction = false;

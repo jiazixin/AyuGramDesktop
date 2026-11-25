@@ -209,6 +209,7 @@ std::optional<int> Provider::fullCount() {
 
 void Provider::restart() {
 	_layouts.clear();
+	_seenIds.clear();
 	_universalAroundId = kDefaultAroundId;
 	_idsLimit = kMinimalIdsLimit;
 	_slice = SparseIdsMergedSlice(sliceKey(_universalAroundId));
@@ -278,6 +279,9 @@ void Provider::refreshViewer() {
 			return;
 		}
 		_slice = std::move(slice);
+		for (auto i = 0, count = _slice.size(); i != count; ++i) {
+			_seenIds.emplace(GetUniversalId(_slice[i]));
+		}
 		if (auto nearest = _slice.nearest(idForViewer)) {
 			_universalAroundId = GetUniversalId(*nearest);
 		}
@@ -442,6 +446,7 @@ SparseIdsMergedSlice::Key Provider::sliceKey(
 
 void Provider::itemRemoved(not_null<const HistoryItem*> item) {
 	const auto id = GetUniversalId(item);
+	_seenIds.remove(id);
 	const auto i = _layouts.find(id);
 	if (i == end(_layouts)) {
 		return;
@@ -623,6 +628,32 @@ void Provider::applyDragSelection(
 				computeSelectionData(item, FullSelection));
 		}
 	}
+}
+
+std::vector<not_null<HistoryItem*>> Provider::collectSelectionRange(
+		not_null<const HistoryItem*> fromItem,
+		not_null<const HistoryItem*> tillItem) {
+	const auto fromId = GetUniversalId(fromItem);
+	const auto tillId = GetUniversalId(tillItem);
+	const auto lo = std::min(fromId, tillId);
+	const auto hi = std::max(fromId, tillId);
+	const auto begin = _seenIds.lower_bound(lo);
+	const auto end = _seenIds.upper_bound(hi);
+	auto result = std::vector<not_null<HistoryItem*>>();
+	result.reserve(std::min(int(std::distance(begin, end)), 1024));
+	for (auto i = end; i != begin;) {
+		--i;
+		if (*i == 0) {
+			continue;
+		}
+		if (const auto item = _controller->session().data().message(
+				computeFullId(*i))) {
+			if (!isMessageHidden(item)) {
+				result.push_back(item);
+			}
+		}
+	}
+	return result;
 }
 
 int64 Provider::scrollTopStatePosition(not_null<HistoryItem*> item) {

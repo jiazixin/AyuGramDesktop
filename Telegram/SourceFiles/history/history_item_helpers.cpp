@@ -675,21 +675,73 @@ bool IsAnchoredEphemeral(not_null<const HistoryItem*> item) {
 
 std::vector<ForwardRange> CollectForwardRanges(
 		const std::vector<not_null<HistoryItem*>> &items) {
+	constexpr auto kMaxForwardMessagesPerRequest = 100;
 	auto ordered = items;
 	ranges::sort(ordered, ranges::less(), &HistoryItem::position);
 	auto result = std::vector<ForwardRange>();
-	for (const auto &item : ordered) {
+	for (auto i = std::size_t(0), count = ordered.size(); i != count;) {
+		const auto item = ordered[i];
 		const auto fromEphemeral = item->isEphemeral();
 		if (fromEphemeral
 			&& !item->history()->session().ephemeralMessages().lookupId(
 				item)) {
+			++i;
 			continue;
 		}
-		if (result.empty()
-			|| result.back().fromEphemeral != fromEphemeral) {
-			result.push_back({ .fromEphemeral = fromEphemeral });
+		const auto groupId = item->groupId();
+		const auto peer = item->history()->peer;
+		auto chunk = std::vector<not_null<HistoryItem*>>();
+		chunk.push_back(item);
+		++i;
+		if (groupId) {
+			while (i != count) {
+				const auto next = ordered[i];
+				if (next->groupId() != groupId
+					|| next->isEphemeral() != fromEphemeral
+					|| next->history()->peer != peer) {
+					break;
+				}
+				if (!fromEphemeral
+					|| next->history()->session().ephemeralMessages().lookupId(
+						next)) {
+					chunk.push_back(next);
+				}
+				++i;
+			}
 		}
-		result.back().items.push_back(item);
+		const auto needNewRange = [&] {
+			if (result.empty()) {
+				return true;
+			}
+			const auto &last = result.back();
+			if (last.fromEphemeral != fromEphemeral
+				|| last.items.front()->history()->peer != peer) {
+				return true;
+			}
+			return (int(last.items.size() + chunk.size())
+				> kMaxForwardMessagesPerRequest);
+		};
+		if (int(chunk.size()) <= kMaxForwardMessagesPerRequest) {
+			if (needNewRange()) {
+				result.push_back({ .fromEphemeral = fromEphemeral });
+			}
+			auto &target = result.back().items;
+			target.insert(target.end(), chunk.begin(), chunk.end());
+		} else {
+			for (auto offset = 0;
+				offset < int(chunk.size());
+				offset += kMaxForwardMessagesPerRequest) {
+				const auto end = std::min(
+					offset + kMaxForwardMessagesPerRequest,
+					int(chunk.size()));
+				result.push_back({
+					.items = std::vector<not_null<HistoryItem*>>(
+						chunk.begin() + offset,
+						chunk.begin() + end),
+					.fromEphemeral = fromEphemeral,
+				});
+			}
+		}
 	}
 	return result;
 }

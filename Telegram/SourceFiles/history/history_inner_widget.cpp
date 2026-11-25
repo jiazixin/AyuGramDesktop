@@ -1379,6 +1379,7 @@ void HistoryInner::setTextSelection(
 	}
 	if (!_selected.empty()) {
 		_selected.clear();
+		_shiftSelectionAnchor = nullptr;
 		_accessibilitySelectionAnchor = nullptr;
 		_widget->updateTopBarSelection();
 		_widget->update();
@@ -2324,13 +2325,20 @@ void HistoryInner::mouseActionStart(const QPoint &screenPos, Qt::MouseButton but
 		? mouseActionView->data().get()
 		: nullptr;
 	_dragStartPosition = mapPointToItem(mapFromGlobal(screenPos), mouseActionView);
+	_pressShiftPressed = base::IsShiftPressed();
 	_pressWasInactive = Ui::WasInactivePress(_controller->widget());
 	if (_pressWasInactive) {
 		Ui::MarkInactivePress(_controller->widget(), false);
 	}
 
 	const auto pressed = ClickHandler::getPressed();
-	if (pressed
+	if (_pressShiftPressed
+		&& !_pressWasInactive
+		&& !hasSelectRestriction()
+		&& _mouseActionItem
+		&& _mouseActionItem->canBeSelected()) {
+		_mouseAction = MouseAction::PrepareSelect;
+	} else if (pressed
 		&& (!Element::Hovered()
 			|| !Element::Hovered()->allowTextSelectionByHandler(pressed))) {
 		_mouseAction = MouseAction::PrepareDrag;
@@ -2402,6 +2410,7 @@ void HistoryInner::mouseActionStart(const QPoint &screenPos, Qt::MouseButton but
 void HistoryInner::mouseActionCancel() {
 	_mouseActionItem = nullptr;
 	_dragStateItem = nullptr;
+	_pressShiftPressed = false;
 	_mouseAction = MouseAction::None;
 	_mouseTextAnchor = TextState();
 	_dragStartPosition = QPoint(0, 0);
@@ -2579,6 +2588,9 @@ void HistoryInner::itemRemoved(not_null<const HistoryItem*> item) {
 	if (_accessibilitySelectionAnchor == item) {
 		_accessibilitySelectionAnchor = nullptr;
 	}
+	if (_shiftSelectionAnchor == item) {
+		_shiftSelectionAnchor = nullptr;
+	}
 	_accessibilityIdentities.remove(item);
 
 	if ((_dragSelFrom && _dragSelFrom->data() == item)
@@ -2627,11 +2639,16 @@ void HistoryInner::mouseActionFinish(
 		Element::Pressed(nullptr);
 	}
 
+	const auto shiftPressed = base::take(_pressShiftPressed);
 	const auto simpleSelectionChange = _mouseActionItem
 		&& !_pressWasInactive
 		&& (button != Qt::RightButton)
 		&& (_mouseAction == MouseAction::PrepareSelect
 			|| _mouseAction == MouseAction::PrepareDrag);
+	const auto needShiftSelection = simpleSelectionChange
+		&& shiftPressed
+		&& !hasSelectRestriction()
+		&& _mouseActionItem->canBeSelected();
 	const auto needItemSelectionToggle = simpleSelectionChange
 		&& (!activated || toggleByHandler(activated))
 		&& hasSelectedItems();
@@ -2640,7 +2657,9 @@ void HistoryInner::mouseActionFinish(
 
 	_wasSelectedText = false;
 
-	if (_mouseAction == MouseAction::Dragging || needItemSelectionToggle) {
+	if (_mouseAction == MouseAction::Dragging
+		|| needItemSelectionToggle
+		|| needShiftSelection) {
 		activated = nullptr;
 	} else if (activated) {
 		const auto pressedItemId = pressedItemView
@@ -2656,7 +2675,28 @@ void HistoryInner::mouseActionFinish(
 			prepareClickContext(button, pressedItemId));
 		return;
 	}
-	if (needItemSelectionToggle) {
+	if (needShiftSelection) {
+		clearTextSelection();
+		const auto pointState = Element::Moused()
+			? Element::Moused()->pointState(
+				mapPointToItem(
+					mapFromGlobal(_mousePosition),
+					Element::Moused()))
+			: HistoryView::PointState::Outside;
+		if (pointState == HistoryView::PointState::GroupPart) {
+			const auto exactItem = _dragStateItem
+				? _dragStateItem
+				: _mouseActionItem;
+			if (exactItem && exactItem->canBeSelected()) {
+				selectShiftRange(exactItem, false);
+			} else {
+				selectShiftRange(_mouseActionItem, true);
+			}
+		} else {
+			selectShiftRange(_mouseActionItem, true);
+		}
+		update();
+	} else if (needItemSelectionToggle) {
 		clearTextSelection();
 		const auto pointState = Element::Moused()
 			? Element::Moused()->pointState(
@@ -2673,9 +2713,15 @@ void HistoryInner::mouseActionFinish(
 					&_selected,
 					exactItem,
 					SelectAction::Invert);
+				if (_selected.contains(exactItem)) {
+					_shiftSelectionAnchor = exactItem;
+				} else if (_selected.empty() || _shiftSelectionAnchor == exactItem) {
+					_shiftSelectionAnchor = nullptr;
+				}
 				repaintItem(_mouseActionItem);
 			} else {
 				_selected.clear();
+				_shiftSelectionAnchor = nullptr;
 				update();
 			}
 		} else if (_mouseActionItem
@@ -2684,9 +2730,16 @@ void HistoryInner::mouseActionFinish(
 				&_selected,
 				_mouseActionItem,
 				SelectAction::Invert);
+			if (isSelectedAsGroup(&_selected, _mouseActionItem)) {
+				_shiftSelectionAnchor = _mouseActionItem;
+			} else if (_selected.empty()
+				|| _shiftSelectionAnchor == _mouseActionItem) {
+				_shiftSelectionAnchor = nullptr;
+			}
 			repaintItem(_mouseActionItem);
 		} else {
 			_selected.clear();
+			_shiftSelectionAnchor = nullptr;
 			update();
 		}
 	} else if (needTextSelectionClear) {
@@ -2698,6 +2751,12 @@ void HistoryInner::mouseActionFinish(
 			&_selected,
 			_mouseActionItem,
 			SelectAction::Invert);
+		if (isSelectedAsGroup(&_selected, _mouseActionItem)) {
+			_shiftSelectionAnchor = _mouseActionItem;
+		} else if (_selected.empty()
+			|| _shiftSelectionAnchor == _mouseActionItem) {
+			_shiftSelectionAnchor = nullptr;
+		}
 		repaintItem(_mouseActionItem);
 	} else if (simpleSelectionChange
 		&& _mouseCursorState == CursorState::Date
@@ -2709,10 +2768,17 @@ void HistoryInner::mouseActionFinish(
 			&_selected,
 			_dragStateItem,
 			SelectAction::Select);
+		if (isSelectedAsGroup(&_selected, _dragStateItem)) {
+			_shiftSelectionAnchor = _dragStateItem;
+		}
 		repaintItem(_mouseActionItem);
 	} else if (_mouseAction == MouseAction::Selecting) {
 		if (_dragSelFrom && _dragSelTo) {
+			const auto lastDragItem = _dragSelTo->data();
 			applyDragSelection();
+			_shiftSelectionAnchor = hasSelectedItems()
+				? lastDragItem.get()
+				: nullptr;
 			_dragSelFrom = _dragSelTo = nullptr;
 		} else if (_selectedTextItem && !_pressWasInactive) {
 			if (_selectedTextSelection.empty()) {
@@ -3280,6 +3346,9 @@ void HistoryInner::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 						} else {
 							changeSelection(&_selected, item, SelectAction::Select);
 						}
+						if (_selected.contains(item)) {
+							_shiftSelectionAnchor = item;
+						}
 						_accessibilitySelectionAnchor = nullptr;
 						repaintItem(item);
 						_widget->updateTopBarSelection();
@@ -3290,9 +3359,12 @@ void HistoryInner::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 					not_null<HistoryItem*> from,
 					not_null<HistoryItem*> to,
 					int max) -> HistoryItemsList {
+				if (max <= 0) {
+					return {};
+				}
 				auto current = from;
 				auto collected = HistoryItemsList();
-				collected.reserve(max);
+				collected.reserve(std::min(max, 256));
 				collected.push_back(from);
 				collected.push_back(to);
 				const auto toId = to->fullId();
@@ -3324,10 +3396,10 @@ void HistoryInner::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 				auto topToBottom = false;
 				auto nearestItem = (HistoryItem*)(nullptr);
 				{
-					auto minDiff = std::numeric_limits<int>::max();
+					auto minDiff = std::numeric_limits<int64>::max();
 					for (const auto &item : _selected) {
-						const auto diff = item->fullId().msg.bare
-							- toItem->fullId().msg.bare;
+						const auto diff = int64(item->fullId().msg.bare)
+							- int64(toItem->fullId().msg.bare);
 						if (std::abs(diff) < minDiff) {
 							nearestItem = item;
 							minDiff = std::abs(diff);
@@ -5364,6 +5436,7 @@ void HistoryInner::clearSelected(bool onlyTextSelection) {
 	auto changed = false;
 	if (!onlyTextSelection && !_selected.empty()) {
 		_selected.clear();
+		_shiftSelectionAnchor = nullptr;
 		_accessibilitySelectionAnchor = nullptr;
 		changed = true;
 	}
@@ -6168,6 +6241,125 @@ void HistoryInner::changeSelectionAsGroup(
 	}
 }
 
+void HistoryInner::selectShiftRange(
+		not_null<HistoryItem*> target,
+		bool asGroup) {
+	if (!hasSelectedItems()) {
+		if (asGroup) {
+			changeSelectionAsGroup(&_selected, target, SelectAction::Select);
+		} else {
+			changeSelection(&_selected, target, SelectAction::Select);
+		}
+		if (_selected.contains(target)) {
+			_shiftSelectionAnchor = target;
+		}
+		return;
+	}
+	const auto isBefore = [&](
+			not_null<const Element*> a,
+			not_null<const Element*> b) {
+		const auto ah = (a->history() == _migrated) ? 0 : 1;
+		const auto bh = (b->history() == _migrated) ? 0 : 1;
+		if (ah != bh) {
+			return ah < bh;
+		}
+		const auto ab = a->block() ? a->block()->indexInHistory() : -1;
+		const auto bb = b->block() ? b->block()->indexInHistory() : -1;
+		if (ab != bb) {
+			return ab < bb;
+		}
+		const auto ai = a->block() ? a->indexInBlock() : -1;
+		const auto bi = b->block() ? b->indexInBlock() : -1;
+		return ai < bi;
+	};
+	auto anchor = _shiftSelectionAnchor;
+	auto anchorView = viewByItem(anchor);
+	if (!anchor || !anchorView || !anchorView->block()) {
+		anchor = nullptr;
+		anchorView = nullptr;
+		auto minDiff = std::numeric_limits<int64>::max();
+		const auto targetUniversal = peerIsChannel(target->fullId().peer)
+			? int64(target->fullId().msg.bare)
+			: (int64(target->fullId().msg.bare) - ServerMaxMsgId.bare);
+		for (const auto &selected : _selected) {
+			const auto view = viewByItem(selected);
+			if (!view || !view->block()) {
+				continue;
+			}
+			const auto selectedUniversal = peerIsChannel(selected->fullId().peer)
+				? int64(selected->fullId().msg.bare)
+				: (int64(selected->fullId().msg.bare) - ServerMaxMsgId.bare);
+			const auto diff = std::abs(selectedUniversal - targetUniversal);
+			if (diff < minDiff) {
+				minDiff = diff;
+				anchor = selected;
+				anchorView = view;
+			}
+		}
+	}
+	const auto targetView = viewByItem(target);
+	if (!anchor || !anchorView || !targetView || !targetView->block()) {
+		if (asGroup) {
+			changeSelectionAsGroup(&_selected, target, SelectAction::Select);
+		} else {
+			changeSelection(&_selected, target, SelectAction::Select);
+		}
+		if (_selected.contains(target)) {
+			_shiftSelectionAnchor = target;
+		}
+		return;
+	}
+	if (!_shiftSelectionAnchor) {
+		_shiftSelectionAnchor = anchor;
+	}
+	auto fromView = anchorView;
+	auto toView = targetView;
+	if (isBefore(toView, fromView)) {
+		std::swap(fromView, toView);
+	}
+	const auto fromBlock = fromView->block()->indexInHistory();
+	const auto fromItem = fromView->indexInBlock();
+	const auto toBlock = toView->block()->indexInHistory();
+	const auto toItem = toView->indexInBlock();
+	if (_migrated && fromView->history() == _migrated) {
+		if (toView->history() == _migrated) {
+			addSelectionRange(
+				&_selected,
+				_migrated,
+				fromBlock,
+				fromItem,
+				toBlock,
+				toItem);
+		} else {
+			if (!_migrated->blocks.empty()
+				&& !_migrated->blocks.back()->messages.empty()) {
+				addSelectionRange(
+					&_selected,
+					_migrated,
+					fromBlock,
+					fromItem,
+					int(_migrated->blocks.size()) - 1,
+					int(_migrated->blocks.back()->messages.size()) - 1);
+			}
+			addSelectionRange(
+				&_selected,
+				_history,
+				0,
+				0,
+				toBlock,
+				toItem);
+		}
+	} else {
+		addSelectionRange(
+			&_selected,
+			_history,
+			fromBlock,
+			fromItem,
+			toBlock,
+			toItem);
+	}
+}
+
 void HistoryInner::setAccessibilityFocusedItem(
 		int index,
 		HistoryItem *item) {
@@ -6422,6 +6614,7 @@ void HistoryInner::addSelectionRange(
 			for (int cnt = (fromblock < toblock) ? block->messages.size() : (toitem + 1); fromitem < cnt; ++fromitem) {
 				auto item = block->messages[fromitem]->data();
 				changeSelectionAsGroup(toItems, item, SelectAction::Select);
+				if (toItems->size() >= MaxSelectedItems) break;
 			}
 			if (toItems->size() >= MaxSelectedItems) break;
 			fromitem = 0;

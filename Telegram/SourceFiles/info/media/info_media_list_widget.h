@@ -291,6 +291,7 @@ private:
 		HistoryItem *item,
 		TextSelection selection);
 	void toggleItemSelection(not_null<HistoryItem*> item);
+	void selectItemRange(not_null<HistoryItem*> target);
 	[[nodiscard]] SelectedMap::iterator itemUnderPressSelection();
 	[[nodiscard]] auto itemUnderPressSelection() const
 		-> SelectedMap::const_iterator;
@@ -420,6 +421,8 @@ private:
 	CursorState _mouseCursorState = CursorState();
 	uint16 _mouseTextSymbol = 0;
 	bool _pressWasInactive = false;
+	bool _pressShiftPressed = false;
+	const HistoryItem *_shiftSelectionAnchor = nullptr;
 	SelectedMap _selected;
 	SelectedMap _dragSelected;
 	rpl::event_stream<SelectedItems> _selectedListStream;

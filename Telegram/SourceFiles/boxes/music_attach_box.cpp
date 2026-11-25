@@ -90,6 +90,7 @@ namespace {
 
 constexpr auto kSearchRequestDelay = crl::time(400);
 constexpr auto kFirstLimit = 10;
+constexpr auto kMaxMusicAttachItems = 100;
 
 class MusicSectionController final : public Info::AbstractController {
 public:
@@ -297,7 +298,7 @@ private:
 	QString _nextOffset;
 	mtpRequestId _resolveRequestId = 0;
 	mtpRequestId _requestId = 0;
-	int _selectedLimit = MaxSelectedItems;
+	int _selectedLimit = kMaxMusicAttachItems;
 	int _titleHeight = 0;
 	int _visibleTop = 0;
 	int _visibleBottom = 0;
@@ -1702,9 +1703,9 @@ void MusicAttachBox(
 	}));
 	for (const auto section : { savedMusic, yourChats }) {
 		section->list()->setSelectOnClick(true);
-		section->list()->setSelectedLimit(MaxSelectedItems);
+		section->list()->setSelectedLimit(kMaxMusicAttachItems);
 	}
-	globalSearch->setSelectedLimit(MaxSelectedItems);
+	globalSearch->setSelectedLimit(kMaxMusicAttachItems);
 
 	struct ViewportAnchor {
 		enum class Kind : uchar {
@@ -1916,7 +1917,7 @@ void MusicAttachBox(
 			state->globalSelection);
 		const auto remaining = std::max(
 			0,
-			MaxSelectedItems - int(state->selection.size()));
+			kMaxMusicAttachItems - int(state->selection.size()));
 		savedMusic->list()->setSelectedLimit(
 			int(state->savedSelection.list.size()) + remaining);
 		yourChats->list()->setSelectedLimit(

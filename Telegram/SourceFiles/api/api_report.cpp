@@ -101,12 +101,21 @@ auto CreateReportMessagesOrStoriesCallback(
 	return [=](
 			Data::ReportInput reportInput,
 			Fn<void(ReportResult)> done) {
+		constexpr auto kMaxReportIds = 100;
 		auto apiIds = QVector<MTPint>();
-		apiIds.reserve(reportInput.ids.size() + reportInput.stories.size());
+		apiIds.reserve(std::min(
+			int(reportInput.ids.size() + reportInput.stories.size()),
+			kMaxReportIds));
 		for (const auto &id : reportInput.ids) {
+			if (int(apiIds.size()) >= kMaxReportIds) {
+				break;
+			}
 			apiIds.push_back(MTP_int(id));
 		}
 		for (const auto &story : reportInput.stories) {
+			if (int(apiIds.size()) >= kMaxReportIds) {
+				break;
+			}
 			apiIds.push_back(MTP_int(story));
 		}
 
